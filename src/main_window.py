@@ -2,13 +2,15 @@
 
 When the active region changes (e.g. North America → Asia), the window
 swaps both the chart instruments and the tile instruments based on YAML.
+
+Data fetching is asynchronous via DataService (thread-pool based).
 """
 from __future__ import annotations
 
 import logging
 import traceback
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCursor, QKeySequence, QShortcut
@@ -41,7 +43,6 @@ class MainWindow(QMainWindow):
         self.data.quote_ready.connect(self._on_quote)
         self.data.series_ready.connect(self._on_series)
 
-        # Track currently-displayed instruments keyed by widget slot
         self.chart_panels: List[ChartPanel] = []
         self.tile_widgets: List[BannerWidget] = []
         self.chart_instruments: List[dict] = []
@@ -52,7 +53,6 @@ class MainWindow(QMainWindow):
         self._install_shortcuts()
         self._apply_window_settings()
 
-        # Refresh timers
         refresh = config.get("refresh", {})
         self.chart_timer = QTimer(self)
         self.chart_timer.setInterval(int(refresh.get("chart_seconds", 60)) * 1000)
@@ -64,19 +64,13 @@ class MainWindow(QMainWindow):
         self.tile_timer.timeout.connect(self._refresh_tiles)
         self.tile_timer.start()
 
-        # Region check (cheap) every 30s
         self.region_timer = QTimer(self)
         self.region_timer.setInterval(30_000)
         self.region_timer.timeout.connect(self._check_region)
         self.region_timer.start()
 
-        # Defer the first region check + data fetch until after the window
-        # is fully shown — calling self.screen() on an unshown window can
-        # return None on some PyQt6 builds.
         QTimer.singleShot(0, lambda: self._check_region(force=True))
 
-    # =========================================================================
-    # UI construction
     # =========================================================================
     def _build_ui(self):
         central = QWidget()
@@ -91,14 +85,12 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(outer_pad, outer_pad, outer_pad, outer_pad)
         outer.setSpacing(self._scaled(layout_cfg.get("chart_gap", 16)))
 
-        # --- Charts row ---
         self.charts_row = QWidget()
         charts_layout = QHBoxLayout(self.charts_row)
         charts_layout.setContentsMargins(0, 0, 0, 0)
         charts_layout.setSpacing(self._scaled(layout_cfg.get("chart_gap", 16)))
         self.charts_layout = charts_layout
 
-        # --- Tiles grid ---
         self.tiles_grid = QWidget()
         tiles_layout = QGridLayout(self.tiles_grid)
         tiles_layout.setContentsMargins(0, 0, 0, 0)
@@ -113,7 +105,6 @@ class MainWindow(QMainWindow):
 
     def _apply_window_settings(self):
         d = self.config.get("display", {})
-        # Resolution
         res = d.get("resolution", "auto")
         if res != "auto":
             try:
@@ -130,7 +121,6 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Markets Display")
 
     def _install_shortcuts(self):
-        # Esc to exit fullscreen / quit (handy on the Pi)
         QShortcut(QKeySequence("Esc"), self, activated=self.close)
         QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
         QShortcut(QKeySequence("R"), self, activated=lambda: self._refresh_all())
@@ -142,10 +132,6 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
 
     def _scaled(self, px_at_1080p: int) -> int:
-        """Scale a 1080p-baseline pixel size to the actual screen height.
-
-        Hardened against early-call cases where self.screen() returns None
-        (window not yet shown) or raises."""
         h = 1080
         try:
             screen = self.screen()
@@ -160,8 +146,6 @@ class MainWindow(QMainWindow):
         factor = h / 1080.0
         return max(1, int(round(px_at_1080p * factor)))
 
-    # =========================================================================
-    # Region switching
     # =========================================================================
     def _check_region(self, force: bool = False):
         try:
@@ -222,8 +206,6 @@ class MainWindow(QMainWindow):
         log.debug("Loaded %d tiles for set=%s", len(instruments), set_name)
 
     # =========================================================================
-    # Data refresh
-    # =========================================================================
     def _refresh_all(self):
         self._refresh_charts()
         self._refresh_tiles()
@@ -241,8 +223,6 @@ class MainWindow(QMainWindow):
             key = f"tile:{idx}"
             self.data.request_quote(key, inst)
 
-    # =========================================================================
-    # Slots from DataService
     # =========================================================================
     def _on_quote(self, key: str, quote):
         try:
@@ -266,13 +246,10 @@ class MainWindow(QMainWindow):
             log.error("_on_series(%s) crashed:\n%s", key, traceback.format_exc())
 
     def _is_market_closed_for_active_region(self) -> bool:
-        """Weekend = closed for North America. (Asia/Europe weekend rules vary;
-        we keep this simple.) Returns True only on weekends for North America."""
         if self.active_region != "north_america":
             return False
-        return datetime.now().weekday() >= 5  # 5=Sat, 6=Sun
+        return datetime.now().weekday() >= 5
 
-    # =========================================================================
     def closeEvent(self, ev):
         log.info("Window closeEvent — shutting down DataService.")
         self.data.stop()

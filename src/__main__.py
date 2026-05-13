@@ -83,6 +83,11 @@ def setup_logging(cfg: dict):
 
     logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
 
+    # Quiet down noisy third-party libraries
+    logging.getLogger("yfinance").setLevel(logging.WARNING)
+    logging.getLogger("peewee").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Markets wall display")

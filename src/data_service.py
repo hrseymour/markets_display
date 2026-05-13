@@ -1,106 +1,131 @@
-"""Background fetcher. Runs in a QThread so network IO never freezes the UI.
+"""Background fetcher using a ThreadPoolExecutor.
 
-Emits signals when fresh data is ready. The main window reconnects which
-instruments it wants whenever the region changes.
+Why not QThread/pyqtSignal? yfinance uses curl_cffi under the hood, which
+has known segfault issues when its HTTP connections are torn down across
+Qt's cross-thread signal machinery on Linux glibc. Plain Python threads
+that return futures avoid that path entirely.
 
-Every worker method is wrapped so any exception is logged with a full
-traceback and routed back to the main thread as a `None` payload — Qt
-threads must NEVER let exceptions escape into the event loop.
+Approach: when the UI wants data, we submit a callable to a thread pool
+and store the resulting Future. A QTimer on the main thread polls all
+in-flight Futures every 100ms. When one is done, we call the result
+handler on the main thread.
+
+This keeps the UI responsive and bypasses Qt's cross-thread signal
+marshaling for the data payload.
 """
 from __future__ import annotations
 
 import logging
 import traceback
-from typing import Dict, List, Optional
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Callable, Dict, Optional
 
-from PyQt6.QtCore import QObject, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
+from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 
 from .providers import IntradaySeries, ProviderDispatcher, Quote
 
 log = logging.getLogger(__name__)
 
 
-class FetchWorker(QObject):
-    """Lives on a worker QThread. Fetches on demand."""
-
-    quote_ready = pyqtSignal(str, object)        # (instrument_key, Quote|None)
-    series_ready = pyqtSignal(str, object)       # (instrument_key, IntradaySeries|None)
-
-    def __init__(self, dispatcher: ProviderDispatcher):
-        super().__init__()
-        self.dispatcher = dispatcher
-
-    @pyqtSlot(str, object)
-    def fetch_quote(self, key: str, instrument: dict):
-        try:
-            q = self.dispatcher.get_quote(instrument)
-            self.quote_ready.emit(key, q)
-        except Exception:
-            log.error(
-                "fetch_quote(%s) crashed:\n%s", key, traceback.format_exc()
-            )
-            try:
-                self.quote_ready.emit(key, None)
-            except Exception:
-                log.exception("Even the failure emit crashed for %s", key)
-
-    @pyqtSlot(str, object, int)
-    def fetch_intraday(self, key: str, instrument: dict, lookback_days: int):
-        try:
-            s = self.dispatcher.get_intraday(instrument, lookback_days)
-            self.series_ready.emit(key, s)
-        except Exception:
-            log.error(
-                "fetch_intraday(%s) crashed:\n%s", key, traceback.format_exc()
-            )
-            try:
-                self.series_ready.emit(key, None)
-            except Exception:
-                log.exception("Even the failure emit crashed for %s", key)
-
-
 class DataService(QObject):
-    """Owns the worker thread and exposes a thin facade for the UI."""
+    """Owns a thread pool and a poller. Exposes Qt signals to the UI.
+
+    Signals are emitted on the MAIN thread (the QTimer runs there), so they
+    can safely update UI widgets directly.
+    """
 
     quote_ready = pyqtSignal(str, object)
     series_ready = pyqtSignal(str, object)
 
-    _request_quote = pyqtSignal(str, object)
-    _request_intraday = pyqtSignal(str, object, int)
-
-    def __init__(self, dispatcher: ProviderDispatcher):
+    def __init__(self, dispatcher: ProviderDispatcher, max_workers: int = 4):
         super().__init__()
-        self.thread = QThread()
-        self.thread.setObjectName("FetchWorkerThread")
-        self.worker = FetchWorker(dispatcher)
-        self.worker.moveToThread(self.thread)
+        self.dispatcher = dispatcher
+        self.executor = ThreadPoolExecutor(
+            max_workers=max_workers, thread_name_prefix="DataFetch"
+        )
+        # Pending futures keyed by full_key; value = (future, kind)
+        # where kind is "quote" or "series"
+        self._pending: Dict[str, tuple] = {}
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(100)
+        self._poll_timer.timeout.connect(self._poll)
+        self._poll_timer.start()
+        log.info("DataService (thread-pool) started with %d workers.", max_workers)
 
-        # Cross-thread signal wiring. We explicitly use QueuedConnection so
-        # the slot runs on the destination thread's event loop. AutoConnection
-        # *should* pick this, but being explicit avoids surprises.
-        self._request_quote.connect(
-            self.worker.fetch_quote, Qt.ConnectionType.QueuedConnection
-        )
-        self._request_intraday.connect(
-            self.worker.fetch_intraday, Qt.ConnectionType.QueuedConnection
-        )
-        self.worker.quote_ready.connect(
-            self.quote_ready, Qt.ConnectionType.QueuedConnection
-        )
-        self.worker.series_ready.connect(
-            self.series_ready, Qt.ConnectionType.QueuedConnection
-        )
-
-        self.thread.start()
-        log.info("DataService thread started.")
-
+    # -------------------------------------------------------------------------
     def request_quote(self, key: str, instrument: dict):
-        self._request_quote.emit(key, instrument)
+        full_key = f"{key}#quote"
+        if full_key in self._pending:
+            return  # older request still in flight; skip
+        fut = self.executor.submit(self._do_get_quote, key, instrument)
+        self._pending[full_key] = (fut, "quote")
 
     def request_intraday(self, key: str, instrument: dict, lookback_days: int = 2):
-        self._request_intraday.emit(key, instrument, lookback_days)
+        full_key = f"{key}#series"
+        if full_key in self._pending:
+            return
+        fut = self.executor.submit(
+            self._do_get_intraday, key, instrument, lookback_days
+        )
+        self._pending[full_key] = (fut, "series")
 
+    # -------------------------------------------------------------------------
+    # Worker functions — run in the thread pool
+    # -------------------------------------------------------------------------
+    def _do_get_quote(self, key: str, instrument: dict) -> Optional[Quote]:
+        try:
+            return self.dispatcher.get_quote(instrument)
+        except Exception:
+            log.error("Quote fetch for %s crashed:\n%s", key, traceback.format_exc())
+            return None
+
+    def _do_get_intraday(
+        self, key: str, instrument: dict, lookback_days: int
+    ) -> Optional[IntradaySeries]:
+        try:
+            return self.dispatcher.get_intraday(instrument, lookback_days)
+        except Exception:
+            log.error(
+                "Intraday fetch for %s crashed:\n%s", key, traceback.format_exc()
+            )
+            return None
+
+    # -------------------------------------------------------------------------
+    # Poller — runs on the main thread via QTimer
+    # -------------------------------------------------------------------------
+    def _poll(self):
+        if not self._pending:
+            return
+        done_keys = []
+        for full_key, (fut, kind) in self._pending.items():
+            if not fut.done():
+                continue
+            done_keys.append(full_key)
+            try:
+                result = fut.result(timeout=0)
+            except Exception:
+                log.error(
+                    "Future %s raised in result():\n%s",
+                    full_key, traceback.format_exc(),
+                )
+                result = None
+
+            ui_key = full_key.split("#")[0]
+            try:
+                if kind == "quote":
+                    self.quote_ready.emit(ui_key, result)
+                else:
+                    self.series_ready.emit(ui_key, result)
+            except Exception:
+                log.error(
+                    "Emit for %s failed:\n%s", full_key, traceback.format_exc()
+                )
+
+        for k in done_keys:
+            self._pending.pop(k, None)
+
+    # -------------------------------------------------------------------------
     def stop(self):
         log.info("DataService stopping...")
-        self.thread.quit()
-        self.thread.wait(2000)
+        self._poll_timer.stop()
+        self.executor.shutdown(wait=False, cancel_futures=True)

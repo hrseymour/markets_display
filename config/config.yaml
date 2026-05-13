@@ -207,7 +207,7 @@ tiles:
 # Logging
 # -----------------------------------------------------------------------------
 logging:
-  level: DEBUG              # DEBUG | INFO | WARNING | ERROR
+  level: INFO              # DEBUG | INFO | WARNING | ERROR
   file: "logs/markets_display.log"
   max_bytes: 5242880       # 5 MB
   backup_count: 3
