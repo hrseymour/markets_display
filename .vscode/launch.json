@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Markets Display (windowed)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "src",
+      "args": ["--windowed"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "QT_QPA_PLATFORM": "xcb"
+      }
+    }
+  ]
+}
