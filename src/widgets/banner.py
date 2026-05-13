@@ -1,20 +1,20 @@
 """CNBC-style banner widget. Used at the top of each chart and in each tile.
 
-Layout for "chart" mode (wide, short — sits atop a chart):
+Layout for both modes:
     NAME                                      [CLOSED]
     PRICE   +CHANGE  [+PCT%]
 
-Layout for "tile" mode (smaller, more compact):
-    NAME
-    PRICE
-    +CHANGE  [+PCT%]
+Difference between modes:
+- "chart": narrower height (sits above a chart).
+- "tile": taller (standalone tile), text slightly larger but in the same
+  typographic family as chart-banner text. Price font is auto-shrunk to
+  fit alongside the change/pct text.
 
 All font sizing is in pixels so it scales linearly with the widget — the
 same code works on a 1080p test screen and a 4K wall display.
 
 NaN/inf protection: if the Quote contains any non-finite numeric field, we
 draw the placeholder (—) instead of attempting to format and paint it.
-Non-finite floats fed to fmt strings or QPainter cause native segfaults.
 """
 from __future__ import annotations
 
@@ -40,8 +40,6 @@ def _finite(x) -> bool:
 
 
 def _quote_is_sane(q: Optional[Quote]) -> bool:
-    """Verify every numeric field is finite. Otherwise the banner falls back
-    to the placeholder display."""
     if q is None:
         return False
     return all(_finite(v) for v in (q.price, q.prev_close, q.change, q.change_pct))
@@ -89,11 +87,9 @@ class BannerWidget(QWidget):
         self.quote: Optional[Quote] = None
         self.is_closed = False
         self.setAutoFillBackground(False)
-        self.setMinimumHeight(72 if mode == "chart" else 110)
+        self.setMinimumHeight(72 if mode == "chart" else 96)
 
     def set_quote(self, quote: Optional[Quote], is_closed: bool = False):
-        # Validate before storing. If the Quote contains any NaN/inf, store
-        # None instead so we draw the placeholder rather than risk a segfault.
         if quote is not None and not _quote_is_sane(quote):
             log.warning(
                 "Banner %r received non-finite Quote: price=%r prev=%r change=%r pct=%r",
@@ -119,36 +115,41 @@ class BannerWidget(QWidget):
             rect = self.rect()
             h = rect.height()
             w = rect.width()
-
             if h <= 0 or w <= 0:
                 return
 
-            # Background
             bg = self.theme.banner_bg if self.mode == "chart" else self.theme.tile_bg
             p.fillRect(rect, bg)
             if self.mode == "tile":
                 p.setPen(QPen(self.theme.tile_border, 1))
                 p.drawRect(rect.adjusted(0, 0, -1, -1))
 
-            if self.mode == "tile":
-                self._paint_tile(p, rect, w, h)
-            else:
-                self._paint_chart_banner(p, rect, w, h)
+            self._paint_inline(p, rect, w, h)
         finally:
             p.end()
 
     # -------------------------------------------------------------------------
-    def _paint_chart_banner(self, p: QPainter, rect: QRect, w: int, h: int):
-        """Horizontal layout: name on top row, price+change on bottom row."""
-        pad_x = max(12, int(h * 0.12))
-        pad_y = max(6, int(h * 0.10))
+    def _paint_inline(self, p: QPainter, rect: QRect, w: int, h: int):
+        """Two-row layout: NAME on top, PRICE + CHANGE + PCT% inline below.
+        Used by both chart and tile modes; tile uses slightly larger fonts."""
+        # Slightly different vertical proportions per mode
+        if self.mode == "tile":
+            pad_x = max(12, int(h * 0.12))
+            pad_y = max(8, int(h * 0.12))
+            name_frac = 0.34
+            price_size_frac = 0.62  # of price-row height
+        else:
+            pad_x = max(12, int(h * 0.12))
+            pad_y = max(6, int(h * 0.10))
+            name_frac = 0.35
+            price_size_frac = 0.90
 
-        name_h = int(h * 0.35)
+        name_h = int(h * name_frac)
         price_h = h - name_h - 2 * pad_y
         if price_h <= 0:
             return
 
-        # Name
+        # --- Name row ---
         name_px = int(name_h * 0.78)
         p.setFont(_font(name_px, bold=True, letter_spacing=103))
         name_rect = QRect(pad_x, pad_y, w - 2 * pad_x, name_h)
@@ -161,7 +162,7 @@ class BannerWidget(QWidget):
             self.name.upper(),
         )
 
-        # Price row
+        # --- Price row ---
         price_y = pad_y + name_h
         price_rect = QRect(pad_x, price_y, w - 2 * pad_x, price_h)
         if self.quote is None:
@@ -170,69 +171,7 @@ class BannerWidget(QWidget):
             p.drawText(price_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, "—")
             return
 
-        self._draw_price_and_change_inline(p, price_rect, price_h)
-
-    def _paint_tile(self, p: QPainter, rect: QRect, w: int, h: int):
-        """Stacked layout: NAME | PRICE | CHANGE — each on its own line."""
-        pad_x = max(10, int(h * 0.10))
-        pad_y = max(6, int(h * 0.08))
-
-        name_h = int(h * 0.22)
-        price_h = int(h * 0.50)
-        change_h = int(h * 0.22)
-
-        if min(name_h, price_h, change_h) <= 0:
-            return
-
-        y = pad_y
-
-        # Name
-        name_px = int(name_h * 0.85)
-        p.setFont(_font(name_px, bold=True, letter_spacing=103))
-        name_rect = QRect(pad_x, y, w - 2 * pad_x, name_h)
-        p.setPen(self.theme.banner_text)
-        p.drawText(
-            name_rect,
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            self.name.upper(),
-        )
-        y += name_h
-
-        # Price
-        if self.quote is None:
-            p.setFont(_font(int(price_h * 0.70)))
-            p.setPen(self.theme.neutral)
-            p.drawText(
-                QRect(pad_x, y, w - 2 * pad_x, price_h),
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                "—",
-            )
-            return
-
-        price_str = fmt_price(self.quote.price, self.decimals) + (self.unit or "")
-        max_w = max(20, w - 2 * pad_x)
-        price_px = self._fit_text_px(price_str, max_w, int(price_h * 0.85))
-        p.setFont(_font(price_px, bold=True))
-        p.setPen(self.theme.banner_text)
-        p.drawText(
-            QRect(pad_x, y, w - 2 * pad_x, price_h),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            price_str,
-        )
-        y += price_h
-
-        # Change + pct
-        change_str = fmt_change(self.quote.change, self.decimals)
-        pct_str = fmt_pct(self.quote.change_pct)
-        combined = f"{change_str}   {pct_str}"
-        change_px = self._fit_text_px(combined, max_w, int(change_h * 0.78))
-        p.setFont(_font(change_px, bold=True))
-        p.setPen(self.theme.trend_color(self.quote.change))
-        p.drawText(
-            QRect(pad_x, y, w - 2 * pad_x, change_h),
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-            combined,
-        )
+        self._draw_price_and_change_inline(p, price_rect, price_h, price_size_frac)
 
     # -------------------------------------------------------------------------
     def _reserve_closed_badge(
@@ -255,7 +194,9 @@ class BannerWidget(QWidget):
         trimmed.setRight(badge_rect.left() - int(pad_x * 0.4))
         return trimmed
 
-    def _draw_price_and_change_inline(self, p: QPainter, price_rect: QRect, price_h: int):
+    def _draw_price_and_change_inline(
+        self, p: QPainter, price_rect: QRect, price_h: int, price_size_frac: float
+    ):
         price_str = fmt_price(self.quote.price, self.decimals) + (self.unit or "")
         change_str = fmt_change(self.quote.change, self.decimals)
         pct_str = fmt_pct(self.quote.change_pct)
@@ -265,10 +206,10 @@ class BannerWidget(QWidget):
         available_w = max(20, price_rect.width())
         gap_h = max(10, int(price_h * 0.20))
 
-        price_px = max(12, int(price_h * 0.90))
-        change_px = max(10, int(price_h * 0.42))
+        price_px = max(12, int(price_h * price_size_frac))
+        change_px = max(10, int(price_h * (price_size_frac * 0.46)))
 
-        # Bounded iteration — never infinite loop
+        # Bounded auto-shrink loop
         for _ in range(64):
             p.setFont(_font(price_px, bold=True))
             price_w = p.fontMetrics().horizontalAdvance(price_str)
@@ -301,17 +242,3 @@ class BannerWidget(QWidget):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             combined_change,
         )
-
-    def _fit_text_px(self, text: str, max_w: int, start_px: int) -> int:
-        """Return the largest pixel font size that fits `text` within `max_w`.
-        Bounded — never loops more than start_px iterations."""
-        px = max(8, int(start_px))
-        # Bounded so a degenerate max_w can't infinite loop
-        for _ in range(px):
-            if px <= 8:
-                return 8
-            fm = QFontMetrics(_font(px, bold=True))
-            if fm.horizontalAdvance(text) <= max_w:
-                return px
-            px -= 1
-        return max(8, px)

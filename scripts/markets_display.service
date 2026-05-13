@@ -15,7 +15,7 @@ Environment="XAUTHORITY=/home/harlan/.Xauthority"
 Environment="PYTHONUNBUFFERED=1"
 EnvironmentFile=-/home/harlan/repos/markets_display/.env
 
-ExecStart=/home/harlan/repos/markets_display/.venv/bin/python -m market_display
+ExecStart=/home/harlan/repos/markets_display/.venv/bin/python -m markets_display
 
 Restart=always
 RestartSec=10

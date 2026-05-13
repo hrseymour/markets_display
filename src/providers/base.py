@@ -13,9 +13,9 @@ That's all. The dispatcher will pick it up.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
-from datetime import datetime
-from typing import List, Optional
+from dataclasses import dataclass, field
+from datetime import date, datetime
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -39,10 +39,20 @@ class IntradayBar:
 
 @dataclass
 class IntradaySeries:
-    """A run of intraday bars plus the prior session close (for the dashed line)."""
+    """A run of intraday bars with per-session reference closes.
+
+    `prev_close` is the close immediately before the most recent session
+    in `bars` — used to compute change/change_pct in the banner.
+
+    `prev_closes_by_date` maps each trading date present in `bars` to the
+    reference close for THAT day (the close of the session immediately
+    before that day). The chart uses this to draw one dashed line per
+    session, anchored to that session's own reference.
+    """
     symbol: str
     bars: List[IntradayBar]
     prev_close: float
+    prev_closes_by_date: Dict[date, float] = field(default_factory=dict)
     market_state: str = "REGULAR"
 
 
@@ -62,9 +72,8 @@ class DataProvider(ABC):
     @abstractmethod
     def get_intraday(self, symbol: str, lookback_days: int = 2) -> Optional[IntradaySeries]:
         """
-        Return intraday bars for the last `lookback_days` sessions.
-        Should also populate prev_close (close of the session before the most
-        recent session present in bars).
+        Return intraday bars for the last `lookback_days` sessions, with a
+        per-session prev_close map (see IntradaySeries).
         Return None on failure so the dispatcher can fall through to the next
         provider.
         """

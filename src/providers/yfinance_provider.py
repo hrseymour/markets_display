@@ -3,13 +3,16 @@
 Guarantees that no NaN/inf prices ever escape this module. yfinance returns
 NaN for off-hours minutes and partial bars, which would crash QPainter
 downstream.
+
+Also populates `prev_closes_by_date` so the chart can draw one dashed
+reference line per session (each session's line at its OWN prior close).
 """
 from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timedelta
-from typing import Optional
+from datetime import date, datetime, timedelta
+from typing import Dict, Optional
 
 import yfinance as yf
 
@@ -26,7 +29,6 @@ def _finite(x) -> bool:
 
 
 def _safe_float(x, default: float = 0.0) -> float:
-    """Coerce to a finite float, or return default."""
     try:
         v = float(x)
         return v if math.isfinite(v) else default
@@ -38,8 +40,6 @@ class YFinanceProvider(DataProvider):
     name = "yfinance"
 
     def _build_quote(self, symbol: str, price: float, prev: float) -> Optional[Quote]:
-        """Construct a Quote, validating every numeric field. Returns None if
-        the inputs can't produce a sane Quote."""
         if not (_finite(price) and _finite(prev)) or price <= 0 or prev <= 0:
             return None
         change = price - prev
@@ -67,7 +67,6 @@ class YFinanceProvider(DataProvider):
             if q is not None:
                 return q
 
-            # Fall back to history
             hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
             if hist is None or hist.empty:
                 return None
@@ -85,7 +84,9 @@ class YFinanceProvider(DataProvider):
     def get_intraday(self, symbol: str, lookback_days: int = 2) -> Optional[IntradaySeries]:
         try:
             ticker = yf.Ticker(symbol)
-            period_days = max(lookback_days + 2, 3)
+            # Grab enough days that we have at least one extra session ahead
+            # of `lookback_days` to anchor the first day's reference line.
+            period_days = max(lookback_days + 3, 5)
             hist = ticker.history(
                 period=f"{period_days}d",
                 interval="1m",
@@ -105,35 +106,6 @@ class YFinanceProvider(DataProvider):
                 return None
 
             wanted_dates = unique_dates[-lookback_days:]
-            prev_session_date = (
-                unique_dates[-(lookback_days + 1)]
-                if len(unique_dates) > lookback_days
-                else unique_dates[0]
-            )
-
-            prev_close: Optional[float] = None
-            if prev_session_date != wanted_dates[0]:
-                prev_rows = hist[hist["date"] == prev_session_date]
-                if not prev_rows.empty:
-                    candidate = _safe_float(prev_rows["Close"].iloc[-1], default=float("nan"))
-                    if _finite(candidate):
-                        prev_close = candidate
-
-            if prev_close is None:
-                daily = ticker.history(period="5d", interval="1d", auto_adjust=False)
-                if not daily.empty:
-                    daily = daily[daily["Close"].notna()]
-                if not daily.empty and len(daily) >= 2:
-                    candidate = _safe_float(daily["Close"].iloc[-2], default=float("nan"))
-                    if _finite(candidate):
-                        prev_close = candidate
-
-            if prev_close is None:
-                first_price = _safe_float(hist["Close"].iloc[0], default=float("nan"))
-                if not _finite(first_price):
-                    return None
-                prev_close = first_price
-
             window = hist[hist["date"].isin(wanted_dates)]
 
             bars = []
@@ -146,11 +118,68 @@ class YFinanceProvider(DataProvider):
             if not bars:
                 return None
 
+            # ---------------------------------------------------------------
+            # Per-session previous closes. For each session in wanted_dates,
+            # find the close of the session immediately before it. Prefer
+            # the prior session's intraday last-close; fall back to daily.
+            # ---------------------------------------------------------------
+            prev_closes_by_date: Dict[date, float] = {}
+
+            daily_closes: Dict[date, float] = {}
+            try:
+                daily = ticker.history(
+                    period=f"{period_days + 5}d",
+                    interval="1d",
+                    auto_adjust=False,
+                )
+                if daily is not None and not daily.empty:
+                    daily = daily[daily["Close"].notna()]
+                    for ts, close in zip(daily.index, daily["Close"]):
+                        c = _safe_float(close, default=float("nan"))
+                        if _finite(c):
+                            d = ts.date() if hasattr(ts, "date") else ts
+                            daily_closes[d] = c
+            except Exception as e:
+                log.debug("yfinance %s: daily history fallback failed: %s", symbol, e)
+
+            for target_date in wanted_dates:
+                prior_intraday = [d for d in unique_dates if d < target_date]
+                anchor: Optional[float] = None
+                if prior_intraday:
+                    prior_date = prior_intraday[-1]
+                    prior_rows = hist[hist["date"] == prior_date]
+                    if not prior_rows.empty:
+                        candidate = _safe_float(
+                            prior_rows["Close"].iloc[-1], default=float("nan")
+                        )
+                        if _finite(candidate):
+                            anchor = candidate
+
+                if anchor is None:
+                    daily_priors = sorted(
+                        d for d in daily_closes.keys() if d < target_date
+                    )
+                    if daily_priors:
+                        anchor = daily_closes[daily_priors[-1]]
+
+                if anchor is not None and _finite(anchor):
+                    prev_closes_by_date[target_date] = anchor
+
+            latest_date = wanted_dates[-1]
+            prev_close = prev_closes_by_date.get(latest_date)
+            if prev_close is None or not _finite(prev_close):
+                prev_close = bars[0].price
+
             log.debug(
-                "yfinance %s: returning %d bars, prev_close=%.2f",
-                symbol, len(bars), prev_close,
+                "yfinance %s: returning %d bars, prev_close=%.2f, sessions=%s",
+                symbol, len(bars), prev_close, len(prev_closes_by_date),
             )
-            return IntradaySeries(symbol=symbol, bars=bars, prev_close=prev_close)
+            return IntradaySeries(
+                symbol=symbol,
+                bars=bars,
+                prev_close=prev_close,
+                prev_closes_by_date=prev_closes_by_date,
+            )
         except Exception as e:
             log.warning("yfinance get_intraday(%s) failed: %s", symbol, e, exc_info=True)
             return None

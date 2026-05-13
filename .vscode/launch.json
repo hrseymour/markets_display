@@ -10,6 +10,21 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "justMyCode": false,
+      "python": "${workspaceFolder}/.venv/bin/python",
+      "env": {
+        "QT_QPA_PLATFORM": "xcb"
+      }
+    },
+    {
+      "name": "Markets Display (fullscreen)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "src",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "python": "${workspaceFolder}/.venv/bin/python",
       "env": {
         "QT_QPA_PLATFORM": "xcb"
       }

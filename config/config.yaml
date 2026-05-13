@@ -127,17 +127,17 @@ providers:
 # -----------------------------------------------------------------------------
 charts:
   north_america:
-    - name: "DOW INDUSTRIALS"
-      short: "DJI"
-      symbols: { yfinance: "^DJI",  eodhd: "DJI.INDX" }
-
     - name: "S&P 500"
       short: "SPX"
       symbols: { yfinance: "^GSPC", eodhd: "GSPC.INDX" }
 
-    - name: "NASDAQ COMPOSITE"
+    - name: "NASDAQ"
       short: "IXIC"
       symbols: { yfinance: "^IXIC", eodhd: "IXIC.INDX" }
+
+    - name: "RUSSELL 2000"
+      short: "RUT"
+      symbols: { yfinance: "^RUT", eodhd: "IXIC.INDX" }
 
   asia:
     - name: "NIKKEI 225"
@@ -174,14 +174,14 @@ charts:
 # -----------------------------------------------------------------------------
 tiles:
   north_america:
-    - { name: "2Y TREASURY",  symbols: { yfinance: "^IRX" },  decimals: 3, unit: "%" }
-    - { name: "10Y TREASURY", symbols: { yfinance: "^TNX" },  decimals: 3, unit: "%" }
-    - { name: "30Y TREASURY", symbols: { yfinance: "^TYX" },  decimals: 3, unit: "%" }
-    - { name: "AAPL",  symbols: { yfinance: "AAPL",  eodhd: "AAPL.US"  }, decimals: 2 }
-    - { name: "MSFT",  symbols: { yfinance: "MSFT",  eodhd: "MSFT.US"  }, decimals: 2 }
-    - { name: "NVDA",  symbols: { yfinance: "NVDA",  eodhd: "NVDA.US"  }, decimals: 2 }
-    - { name: "GOOGL", symbols: { yfinance: "GOOGL", eodhd: "GOOGL.US" }, decimals: 2 }
-    - { name: "TSLA",  symbols: { yfinance: "TSLA",  eodhd: "TSLA.US"  }, decimals: 2 }
+    - { name: "AMZN", symbols: { yfinance: "AMZN", eodhd: "AMZN.US" }, decimals: 2 }
+    - { name: "GOOG", symbols: { yfinance: "GOOG", eodhd: "GOOG.US" }, decimals: 2 }
+    - { name: "META",  symbols: { yfinance: "META",  eodhd: "META.US"  }, decimals: 2 }
+    - { name: "BRK-B",  symbols: { yfinance: "BRK-B",  eodhd: "BRK-B.US"  }, decimals: 2 }
+    - { name: "13W T-BILL",  symbols: { yfinance: "^IRX" },  decimals: 3, unit: "%" }
+    - { name: "5Y TREAS",  symbols: { yfinance: "^FVX" },  decimals: 3, unit: "%" }
+    - { name: "10Y TREAS", symbols: { yfinance: "^TNX" },  decimals: 3, unit: "%" }
+    - { name: "30Y TREAS", symbols: { yfinance: "^TYX" },  decimals: 3, unit: "%" }
 
   asia:
     - { name: "USD/JPY", symbols: { yfinance: "JPY=X"   }, decimals: 2 }

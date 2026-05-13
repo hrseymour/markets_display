@@ -1,22 +1,24 @@
-"""Simple line chart with a dashed previous-close reference line.
+"""Single-day line chart with a dashed previous-close reference line.
 
-Deliberately minimal: no candlesticks, no volume, no axes clutter.
-- Single thin colored line (green up / red down based on day-over-day)
-- Subtle area fill below
-- Dashed horizontal line at previous-day close, labeled at right edge
-- Y-axis labels on the left (auto-scaled, 4 ticks)
-- X-axis: subtle vertical separator between sessions if lookback_days >= 2
+Minimal CNBC-style look:
+- Dark background (matches the surrounding window).
+- White Y-axis tick labels on the left.
+- No fill below the line — just the colored line.
+- Segment coloring with INTERPOLATED crossings at the reference line.
+- One dashed amber reference line at yesterday's close. No label — the
+  reference value is implied by the banner's prev_close above the chart.
+- "Nice" rounded y-axis tick values (multiples of 10, 25, 50, 100, etc.)
+- No date label below the chart (it's always today's session).
+- Visible grid lines — recessed but readable.
 
-NaN/inf protection: yfinance returns NaN prices for off-hours minutes and
-sometimes for the most recent partial bar. Feeding NaN coordinates to
-QPainter's native C++ side causes an immediate segfault with no Python
-traceback. This module filters all values through `math.isfinite()` before
-any painter call.
+NaN/inf protection throughout: feeding non-finite coordinates to QPainter
+causes a native segfault with no Python traceback.
 """
 from __future__ import annotations
 
 import logging
 import math
+from datetime import date as date_t
 from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import QPointF, Qt, QRectF
@@ -30,12 +32,56 @@ from ..theme import Theme
 log = logging.getLogger(__name__)
 
 
+# Colors tuned for the dark background.
+GRID_LINE = QColor("#2E3548")     # visible-but-recessed grid
+AXIS_TEXT = QColor("#FFFFFF")     # bright white tick labels
+UP_LINE = QColor("#00D964")       # CNBC-style bright green
+DOWN_LINE = QColor("#FF3B3B")     # CNBC-style bright red
+
+
 def _finite(x) -> bool:
-    """True only if x is a real, finite number."""
     try:
         return math.isfinite(float(x))
     except (TypeError, ValueError):
         return False
+
+
+def _with_alpha(c: QColor, alpha_byte: int) -> QColor:
+    nc = QColor(c)
+    nc.setAlpha(max(0, min(255, alpha_byte)))
+    return nc
+
+
+def _nice_ticks(lo: float, hi: float, target_count: int = 5) -> List[float]:
+    """Return a list of 'nice' tick values covering [lo, hi].
+
+    Uses the standard 1-2-5 progression. The returned ticks may extend
+    slightly beyond [lo, hi] at the ends — the caller filters those.
+    """
+    if not (_finite(lo) and _finite(hi)) or hi <= lo:
+        return []
+    raw_step = (hi - lo) / max(1, target_count)
+    magnitude = 10 ** math.floor(math.log10(raw_step))
+    residual = raw_step / magnitude
+    if residual < 1.5:
+        nice = 1
+    elif residual < 3:
+        nice = 2
+    elif residual < 7:
+        nice = 5
+    else:
+        nice = 10
+    step = nice * magnitude
+    first = math.floor(lo / step) * step
+    ticks = []
+    v = first
+    for _ in range(200):
+        if v > hi + step / 2:
+            break
+        if v >= lo - step / 2:
+            ticks.append(v)
+        v += step
+    return ticks
 
 
 class LineChart(QWidget):
@@ -69,21 +115,28 @@ class LineChart(QWidget):
                 self._draw_empty(p, rect, "Loading…")
                 return
 
-            # Filter out NaN/inf bars BEFORE anything else touches them.
             clean_bars = self._clean_bars(self.series.bars)
-            prev_close = self.series.prev_close if _finite(self.series.prev_close) else None
-
             if not clean_bars:
                 self._draw_empty(p, rect, "No data")
                 return
 
-            self._draw_chart(p, rect, clean_bars, prev_close)
+            # Only the most recent session
+            last_date = clean_bars[-1].timestamp.date()
+            session_bars = [b for b in clean_bars if b.timestamp.date() == last_date]
+            if not session_bars:
+                self._draw_empty(p, rect, "No data")
+                return
+
+            anchor = self.series.prev_closes_by_date.get(last_date)
+            if anchor is None or not _finite(anchor):
+                anchor = self.series.prev_close if _finite(self.series.prev_close) else None
+
+            self._draw_chart(p, rect, session_bars, anchor)
         finally:
             p.end()
 
     @staticmethod
     def _clean_bars(bars: List[IntradayBar]) -> List[IntradayBar]:
-        """Drop any bars whose price isn't a real finite number."""
         if not bars:
             return []
         return [b for b in bars if _finite(b.price)]
@@ -94,18 +147,15 @@ class LineChart(QWidget):
         p: QPainter,
         rect,
         bars: List[IntradayBar],
-        prev_close: Optional[float],
+        anchor: Optional[float],
     ):
         prices = [b.price for b in bars]
-        # All bars are guaranteed finite by _clean_bars; still defensive:
         lo = min(prices)
         hi = max(prices)
-        if prev_close is not None:
-            lo = min(lo, prev_close)
-            hi = max(hi, prev_close)
+        if anchor is not None and _finite(anchor):
+            lo = min(lo, anchor)
+            hi = max(hi, anchor)
 
-        # Final sanity check — if anything went sideways, bail to empty rather
-        # than feeding bad values to QPainter.
         if not (_finite(lo) and _finite(hi)):
             self._draw_empty(p, rect, "Bad data")
             return
@@ -116,11 +166,15 @@ class LineChart(QWidget):
         lo -= span * 0.08
         hi += span * 0.08
 
-        # Left margin reserved for Y-axis labels
-        left_margin = max(56, int(rect.width() * 0.06))
-        right_margin = max(72, int(rect.width() * 0.08))
-        top_margin = 8
-        bottom_margin = 18
+        ch = rect.height()
+        axis_px = max(10, int(ch * 0.032))
+
+        # Tight right margin (just enough so the end-point dot doesn't clip)
+        # and no bottom margin for a date label.
+        left_margin = max(72, int(rect.width() * 0.07))
+        right_margin = 12
+        top_margin = 10
+        bottom_margin = 10
 
         plot_rect = QRectF(
             rect.left() + left_margin,
@@ -129,84 +183,89 @@ class LineChart(QWidget):
             rect.height() - top_margin - bottom_margin,
         )
 
-        # Grid + Y-axis labels
-        self._draw_y_axis(p, plot_rect, lo, hi)
-
-        # Session separators (vertical lines between trading days)
-        self._draw_session_separators(p, plot_rect, bars)
-
-        # Previous close dashed line
-        if prev_close is not None:
-            y_prev = self._y(prev_close, lo, hi, plot_rect)
-            if _finite(y_prev):
-                pen = QPen(self.theme.prev_close_line, 1.4)
-                pen.setStyle(Qt.PenStyle.DashLine)
-                pen.setDashPattern([6, 4])
-                p.setPen(pen)
-                p.drawLine(
-                    QPointF(plot_rect.left(), y_prev),
-                    QPointF(plot_rect.right(), y_prev),
-                )
-                label_font = QFont()
-                label_font.setPointSizeF(9)
-                p.setFont(label_font)
-                p.setPen(self.theme.prev_close_line)
-                p.drawText(
-                    QRectF(plot_rect.right() + 4, y_prev - 8, right_margin - 8, 16),
-                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                    f"{prev_close:,.2f}",
-                )
-
-        # Trend color from last vs prev_close
-        last_price = bars[-1].price
-        reference = prev_close if prev_close is not None else bars[0].price
-        change = last_price - reference
-        line_color = self.theme.trend_color(change)
-        fill_color = self.theme.trend_fill(change)
-
-        # Build the path — every point validated before adding
         n = len(bars)
         if n < 2:
             return
 
-        def x_for(i):
+        def x_for(i: int) -> float:
             return plot_rect.left() + (i / (n - 1)) * plot_rect.width()
 
-        path = QPainterPath()
-        started = False
+        # Y-axis grid + labels
+        self._draw_y_axis(p, plot_rect, lo, hi, axis_px)
+
+        # Dashed reference line (no label on the right)
+        ref = anchor if (anchor is not None and _finite(anchor)) else None
+        y_anchor = self._y(ref, lo, hi, plot_rect) if ref is not None else None
+
+        if ref is not None and y_anchor is not None and _finite(y_anchor):
+            pen = QPen(self.theme.prev_close_line, 1.4)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            pen.setDashPattern([6, 4])
+            p.setPen(pen)
+            p.drawLine(
+                QPointF(plot_rect.left(), y_anchor),
+                QPointF(plot_rect.right(), y_anchor),
+            )
+
+        # Pre-compute screen coords
+        coords: List[Tuple[float, float]] = []
         for i, b in enumerate(bars):
-            y = self._y(b.price, lo, hi, plot_rect)
             x = x_for(i)
+            y = self._y(b.price, lo, hi, plot_rect)
             if not (_finite(x) and _finite(y)):
-                continue
-            if not started:
-                path.moveTo(x, y)
-                started = True
+                coords.append((float("nan"), float("nan")))
             else:
-                path.lineTo(x, y)
+                coords.append((x, y))
 
-        if not started:
-            return
+        # Draw the line with INTERPOLATED color crossings at the anchor.
+        pen_up = QPen(UP_LINE, 1.8)
+        pen_up.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen_up.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen_down = QPen(DOWN_LINE, 1.8)
+        pen_down.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen_down.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
 
-        # Area fill under the line
-        fill_path = QPainterPath(path)
-        fill_path.lineTo(x_for(n - 1), plot_rect.bottom())
-        fill_path.lineTo(x_for(0), plot_rect.bottom())
-        fill_path.closeSubpath()
-        p.fillPath(fill_path, QBrush(fill_color))
+        for i in range(n - 1):
+            x0, y0 = coords[i]
+            x1, y1 = coords[i + 1]
+            if not (_finite(x0) and _finite(y0) and _finite(x1) and _finite(y1)):
+                continue
 
-        # The line itself
-        pen = QPen(line_color, 1.8)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        p.setPen(pen)
-        p.drawPath(path)
+            if ref is None or y_anchor is None or not _finite(y_anchor):
+                p.setPen(pen_up)
+                p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
+                continue
+
+            p0_up = bars[i].price >= ref
+            p1_up = bars[i + 1].price >= ref
+
+            if p0_up == p1_up:
+                p.setPen(pen_up if p0_up else pen_down)
+                p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
+            else:
+                # Interpolate to find the exact screen crossing point
+                dy = y1 - y0
+                if abs(dy) < 1e-9:
+                    p.setPen(pen_up if p0_up else pen_down)
+                    p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
+                    continue
+                t = (y_anchor - y0) / dy
+                t = max(0.0, min(1.0, t))
+                xc = x0 + t * (x1 - x0)
+                yc = y_anchor
+                p.setPen(pen_up if p0_up else pen_down)
+                p.drawLine(QPointF(x0, y0), QPointF(xc, yc))
+                p.setPen(pen_up if p1_up else pen_down)
+                p.drawLine(QPointF(xc, yc), QPointF(x1, y1))
 
         # End-point dot
-        end_x = x_for(n - 1)
-        end_y = self._y(bars[-1].price, lo, hi, plot_rect)
+        end_x, end_y = coords[-1]
         if _finite(end_x) and _finite(end_y):
-            p.setBrush(QBrush(line_color))
+            if ref is not None and _finite(ref):
+                end_color = UP_LINE if bars[-1].price >= ref else DOWN_LINE
+            else:
+                end_color = UP_LINE
+            p.setBrush(QBrush(end_color))
             p.setPen(Qt.PenStyle.NoPen)
             p.drawEllipse(QPointF(end_x, end_y), 3.5, 3.5)
 
@@ -221,64 +280,35 @@ class LineChart(QWidget):
             frac = (value - lo) / (hi - lo)
         return plot_rect.bottom() - frac * plot_rect.height()
 
-    def _draw_y_axis(self, p: QPainter, plot_rect: QRectF, lo: float, hi: float):
-        ticks = 4
+    def _draw_y_axis(self, p: QPainter, plot_rect: QRectF, lo: float, hi: float, px: int):
         font = QFont()
-        font.setPointSizeF(9)
+        font.setPixelSize(px)
+        font.setBold(False)
         p.setFont(font)
-        for i in range(ticks + 1):
-            frac = i / ticks
-            value = lo + frac * (hi - lo)
-            y = plot_rect.bottom() - frac * plot_rect.height()
-            if not (_finite(value) and _finite(y)):
+
+        ticks = _nice_ticks(lo, hi, target_count=5)
+        for value in ticks:
+            y = self._y(value, lo, hi, plot_rect)
+            if not _finite(y):
                 continue
-            pen = QPen(self.theme.grid, 1)
-            pen.setStyle(Qt.PenStyle.SolidLine)
-            p.setPen(pen)
+            if y < plot_rect.top() - 1 or y > plot_rect.bottom() + 1:
+                continue
+            grid_pen = QPen(GRID_LINE, 1)
+            grid_pen.setStyle(Qt.PenStyle.SolidLine)
+            p.setPen(grid_pen)
             p.drawLine(QPointF(plot_rect.left(), y), QPointF(plot_rect.right(), y))
-            p.setPen(self.theme.axis)
+            # White label outside the plot, on the dark window background
+            p.setPen(AXIS_TEXT)
+            label_h = px + 4
             p.drawText(
-                QRectF(0, y - 8, plot_rect.left() - 4, 16),
+                QRectF(0, y - label_h / 2, plot_rect.left() - 6, label_h),
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                 f"{value:,.0f}",
             )
 
-    def _draw_session_separators(self, p: QPainter, plot_rect: QRectF, bars):
-        n = len(bars)
-        if n < 2:
-            return
-        pen = QPen(self.theme.axis, 1)
-        pen.setStyle(Qt.PenStyle.DashLine)
-        pen.setDashPattern([2, 4])
-        p.setPen(pen)
-        last_date = bars[0].timestamp.date()
-        for i in range(1, n):
-            d = bars[i].timestamp.date()
-            if d != last_date:
-                x = plot_rect.left() + (i / (n - 1)) * plot_rect.width()
-                if not _finite(x):
-                    continue
-                p.drawLine(QPointF(x, plot_rect.top()), QPointF(x, plot_rect.bottom()))
-                font = QFont()
-                font.setPointSizeF(8)
-                p.setFont(font)
-                p.setPen(self.theme.axis)
-                # Cross-platform date format (%-m fails on Windows)
-                date_str = f"{d.month}/{d.day}"
-                p.drawText(
-                    QRectF(x - 30, plot_rect.bottom() + 2, 60, 14),
-                    Qt.AlignmentFlag.AlignCenter,
-                    date_str,
-                )
-                pen = QPen(self.theme.axis, 1)
-                pen.setStyle(Qt.PenStyle.DashLine)
-                pen.setDashPattern([2, 4])
-                p.setPen(pen)
-                last_date = d
-
     def _draw_empty(self, p: QPainter, rect, message: str = "Loading…"):
-        p.setPen(self.theme.neutral)
+        p.setPen(_with_alpha(QColor("#FFFFFF"), 180))
         font = QFont()
-        font.setPointSizeF(11)
+        font.setPixelSize(max(14, int(rect.height() * 0.06)))
         p.setFont(font)
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, message)
