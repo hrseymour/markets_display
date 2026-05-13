@@ -11,9 +11,15 @@ Layout for "tile" mode (smaller, more compact):
 
 All font sizing is in pixels so it scales linearly with the widget — the
 same code works on a 1080p test screen and a 4K wall display.
+
+NaN/inf protection: if the Quote contains any non-finite numeric field, we
+draw the placeholder (—) instead of attempting to format and paint it.
+Non-finite floats fed to fmt strings or QPainter cause native segfaults.
 """
 from __future__ import annotations
 
+import logging
+import math
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QRect
@@ -23,13 +29,30 @@ from PyQt6.QtWidgets import QWidget
 from ..providers import Quote
 from ..theme import Theme
 
+log = logging.getLogger(__name__)
+
+
+def _finite(x) -> bool:
+    try:
+        return math.isfinite(float(x))
+    except (TypeError, ValueError):
+        return False
+
+
+def _quote_is_sane(q: Optional[Quote]) -> bool:
+    """Verify every numeric field is finite. Otherwise the banner falls back
+    to the placeholder display."""
+    if q is None:
+        return False
+    return all(_finite(v) for v in (q.price, q.prev_close, q.change, q.change_pct))
+
 
 def fmt_price(value: float, decimals: int) -> str:
     return f"{value:,.{decimals}f}"
 
 
 def fmt_change(value: float, decimals: int) -> str:
-    sign = "+" if value >= 0 else "−"  # unicode minus, looks nicer
+    sign = "+" if value >= 0 else "−"
     return f"{sign}{abs(value):,.{decimals}f}"
 
 
@@ -69,6 +92,14 @@ class BannerWidget(QWidget):
         self.setMinimumHeight(72 if mode == "chart" else 110)
 
     def set_quote(self, quote: Optional[Quote], is_closed: bool = False):
+        # Validate before storing. If the Quote contains any NaN/inf, store
+        # None instead so we draw the placeholder rather than risk a segfault.
+        if quote is not None and not _quote_is_sane(quote):
+            log.warning(
+                "Banner %r received non-finite Quote: price=%r prev=%r change=%r pct=%r",
+                self.name, quote.price, quote.prev_close, quote.change, quote.change_pct,
+            )
+            quote = None
         self.quote = quote
         self.is_closed = is_closed
         self.update()
@@ -77,10 +108,8 @@ class BannerWidget(QWidget):
     def paintEvent(self, ev):
         try:
             self._paint(ev)
-        except Exception as e:
-            # Never let an exception escape a Qt paint event.
-            import logging
-            logging.getLogger(__name__).exception("Banner paint failed: %s", e)
+        except Exception:
+            log.exception("Banner %r paint failed", self.name)
 
     def _paint(self, ev):
         p = QPainter(self)
@@ -90,6 +119,9 @@ class BannerWidget(QWidget):
             rect = self.rect()
             h = rect.height()
             w = rect.width()
+
+            if h <= 0 or w <= 0:
+                return
 
             # Background
             bg = self.theme.banner_bg if self.mode == "chart" else self.theme.tile_bg
@@ -113,6 +145,8 @@ class BannerWidget(QWidget):
 
         name_h = int(h * 0.35)
         price_h = h - name_h - 2 * pad_y
+        if price_h <= 0:
+            return
 
         # Name
         name_px = int(name_h * 0.78)
@@ -139,19 +173,20 @@ class BannerWidget(QWidget):
         self._draw_price_and_change_inline(p, price_rect, price_h)
 
     def _paint_tile(self, p: QPainter, rect: QRect, w: int, h: int):
-        """Stacked layout: NAME | PRICE | CHANGE — each on its own line.
-        Price is the dominant element."""
+        """Stacked layout: NAME | PRICE | CHANGE — each on its own line."""
         pad_x = max(10, int(h * 0.10))
         pad_y = max(6, int(h * 0.08))
 
-        # Vertical budget: name 22%, price 50%, change 22%
         name_h = int(h * 0.22)
         price_h = int(h * 0.50)
         change_h = int(h * 0.22)
 
+        if min(name_h, price_h, change_h) <= 0:
+            return
+
         y = pad_y
 
-        # --- Name ---
+        # Name
         name_px = int(name_h * 0.85)
         p.setFont(_font(name_px, bold=True, letter_spacing=103))
         name_rect = QRect(pad_x, y, w - 2 * pad_x, name_h)
@@ -163,7 +198,7 @@ class BannerWidget(QWidget):
         )
         y += name_h
 
-        # --- Price (large) ---
+        # Price
         if self.quote is None:
             p.setFont(_font(int(price_h * 0.70)))
             p.setPen(self.theme.neutral)
@@ -175,7 +210,8 @@ class BannerWidget(QWidget):
             return
 
         price_str = fmt_price(self.quote.price, self.decimals) + (self.unit or "")
-        price_px = self._fit_text_px(price_str, w - 2 * pad_x, int(price_h * 0.85))
+        max_w = max(20, w - 2 * pad_x)
+        price_px = self._fit_text_px(price_str, max_w, int(price_h * 0.85))
         p.setFont(_font(price_px, bold=True))
         p.setPen(self.theme.banner_text)
         p.drawText(
@@ -185,11 +221,11 @@ class BannerWidget(QWidget):
         )
         y += price_h
 
-        # --- Change + pct ---
+        # Change + pct
         change_str = fmt_change(self.quote.change, self.decimals)
         pct_str = fmt_pct(self.quote.change_pct)
         combined = f"{change_str}   {pct_str}"
-        change_px = self._fit_text_px(combined, w - 2 * pad_x, int(change_h * 0.78))
+        change_px = self._fit_text_px(combined, max_w, int(change_h * 0.78))
         p.setFont(_font(change_px, bold=True))
         p.setPen(self.theme.trend_color(self.quote.change))
         p.drawText(
@@ -202,8 +238,6 @@ class BannerWidget(QWidget):
     def _reserve_closed_badge(
         self, p: QPainter, name_rect: QRect, name_h: int, pad_x: int
     ) -> QRect:
-        """If closed, draw the badge in the top-right and return the trimmed
-        name rect."""
         if not self.is_closed:
             return name_rect
         badge_text = "CLOSED"
@@ -222,32 +256,30 @@ class BannerWidget(QWidget):
         return trimmed
 
     def _draw_price_and_change_inline(self, p: QPainter, price_rect: QRect, price_h: int):
-        """Used by chart-banner mode: price + change on the same line."""
         price_str = fmt_price(self.quote.price, self.decimals) + (self.unit or "")
         change_str = fmt_change(self.quote.change, self.decimals)
         pct_str = fmt_pct(self.quote.change_pct)
         combined_change = f"{change_str}   {pct_str}"
         trend_color = self.theme.trend_color(self.quote.change)
 
-        available_w = price_rect.width()
+        available_w = max(20, price_rect.width())
         gap_h = max(10, int(price_h * 0.20))
 
-        # Start with a generous price size and shrink to fit alongside change
-        price_px = int(price_h * 0.90)
-        change_px = int(price_h * 0.42)
+        price_px = max(12, int(price_h * 0.90))
+        change_px = max(10, int(price_h * 0.42))
 
-        while price_px > 12:
+        # Bounded iteration — never infinite loop
+        for _ in range(64):
             p.setFont(_font(price_px, bold=True))
             price_w = p.fontMetrics().horizontalAdvance(price_str)
             p.setFont(_font(change_px, bold=True))
             change_w = p.fontMetrics().horizontalAdvance(combined_change)
-            if price_w + gap_h + change_w <= available_w:
+            if price_w + gap_h + change_w <= available_w or price_px <= 12:
                 break
             price_px -= 2
             if price_px % 4 == 0 and change_px > 10:
                 change_px -= 1
 
-        # Draw price
         p.setFont(_font(price_px, bold=True))
         price_w = p.fontMetrics().horizontalAdvance(price_str)
         p.setPen(self.theme.banner_text)
@@ -256,7 +288,6 @@ class BannerWidget(QWidget):
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
             price_str,
         )
-        # Draw change
         change_rect = QRect(
             price_rect.left() + price_w + gap_h,
             price_rect.top(),
@@ -272,11 +303,15 @@ class BannerWidget(QWidget):
         )
 
     def _fit_text_px(self, text: str, max_w: int, start_px: int) -> int:
-        """Return the largest pixel font size that fits `text` within `max_w`."""
-        px = start_px
-        while px > 8:
+        """Return the largest pixel font size that fits `text` within `max_w`.
+        Bounded — never loops more than start_px iterations."""
+        px = max(8, int(start_px))
+        # Bounded so a degenerate max_w can't infinite loop
+        for _ in range(px):
+            if px <= 8:
+                return 8
             fm = QFontMetrics(_font(px, bold=True))
             if fm.horizontalAdvance(text) <= max_w:
                 return px
             px -= 1
-        return px
+        return max(8, px)

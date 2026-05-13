@@ -1,7 +1,13 @@
-"""yfinance-backed provider. No API key needed; ~15 min delayed for most US indices."""
+"""yfinance-backed provider. No API key needed; ~15 min delayed for most US indices.
+
+Guarantees that no NaN/inf prices ever escape this module. yfinance returns
+NaN for off-hours minutes and partial bars, which would crash QPainter
+downstream.
+"""
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -12,36 +18,66 @@ from .base import DataProvider, IntradayBar, IntradaySeries, Quote
 log = logging.getLogger(__name__)
 
 
+def _finite(x) -> bool:
+    try:
+        return math.isfinite(float(x))
+    except (TypeError, ValueError):
+        return False
+
+
+def _safe_float(x, default: float = 0.0) -> float:
+    """Coerce to a finite float, or return default."""
+    try:
+        v = float(x)
+        return v if math.isfinite(v) else default
+    except (TypeError, ValueError):
+        return default
+
+
 class YFinanceProvider(DataProvider):
     name = "yfinance"
+
+    def _build_quote(self, symbol: str, price: float, prev: float) -> Optional[Quote]:
+        """Construct a Quote, validating every numeric field. Returns None if
+        the inputs can't produce a sane Quote."""
+        if not (_finite(price) and _finite(prev)) or price <= 0 or prev <= 0:
+            return None
+        change = price - prev
+        change_pct = (change / prev * 100.0)
+        if not (_finite(change) and _finite(change_pct)):
+            return None
+        return Quote(
+            symbol=symbol,
+            price=price,
+            prev_close=prev,
+            change=change,
+            change_pct=change_pct,
+            timestamp=datetime.now(),
+            market_state="REGULAR",
+        )
 
     def get_quote(self, symbol: str) -> Optional[Quote]:
         try:
             ticker = yf.Ticker(symbol)
-            # fast_info is cheap and contains last_price + previous_close
             fi = ticker.fast_info
-            price = float(fi.get("last_price") or fi.get("lastPrice") or 0.0)
-            prev = float(fi.get("previous_close") or fi.get("previousClose") or 0.0)
-            if not price or not prev:
-                # Fall back to 1-day history if fast_info was incomplete
-                hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
-                if hist.empty or len(hist) < 1:
-                    return None
-                price = float(hist["Close"].iloc[-1])
-                prev = float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+            price = _safe_float(fi.get("last_price") or fi.get("lastPrice"))
+            prev = _safe_float(fi.get("previous_close") or fi.get("previousClose"))
 
-            change = price - prev
-            change_pct = (change / prev * 100.0) if prev else 0.0
-            state = self._market_state(ticker)
-            return Quote(
-                symbol=symbol,
-                price=price,
-                prev_close=prev,
-                change=change,
-                change_pct=change_pct,
-                timestamp=datetime.now(),
-                market_state=state,
-            )
+            q = self._build_quote(symbol, price, prev)
+            if q is not None:
+                return q
+
+            # Fall back to history
+            hist = ticker.history(period="2d", interval="1d", auto_adjust=False)
+            if hist is None or hist.empty:
+                return None
+            hist = hist[hist["Close"].notna()]
+            if hist.empty:
+                return None
+            price = _safe_float(hist["Close"].iloc[-1])
+            prev = _safe_float(hist["Close"].iloc[-2]) if len(hist) >= 2 else price
+            return self._build_quote(symbol, price, prev)
+
         except Exception as e:
             log.warning("yfinance get_quote(%s) failed: %s", symbol, e)
             return None
@@ -49,8 +85,6 @@ class YFinanceProvider(DataProvider):
     def get_intraday(self, symbol: str, lookback_days: int = 2) -> Optional[IntradaySeries]:
         try:
             ticker = yf.Ticker(symbol)
-            # 1-minute bars only go back ~7 days. For a 2-day window this is fine.
-            # We grab one extra day so we can find the prior session's close.
             period_days = max(lookback_days + 2, 3)
             hist = ticker.history(
                 period=f"{period_days}d",
@@ -58,11 +92,13 @@ class YFinanceProvider(DataProvider):
                 auto_adjust=False,
                 prepost=False,
             )
+            if hist is None or hist.empty:
+                return None
+
+            hist = hist[hist["Close"].notna()].copy()
             if hist.empty:
                 return None
 
-            # Group by trading date; keep the most recent `lookback_days` sessions
-            hist = hist.copy()
             hist["date"] = hist.index.date
             unique_dates = sorted(hist["date"].unique())
             if len(unique_dates) < 1:
@@ -75,43 +111,46 @@ class YFinanceProvider(DataProvider):
                 else unique_dates[0]
             )
 
-            # Previous session close = last close on the day BEFORE our window starts.
-            # If we don't have it, fall back to daily history.
-            prev_close: float
+            prev_close: Optional[float] = None
             if prev_session_date != wanted_dates[0]:
                 prev_rows = hist[hist["date"] == prev_session_date]
-                prev_close = float(prev_rows["Close"].iloc[-1])
-            else:
+                if not prev_rows.empty:
+                    candidate = _safe_float(prev_rows["Close"].iloc[-1], default=float("nan"))
+                    if _finite(candidate):
+                        prev_close = candidate
+
+            if prev_close is None:
                 daily = ticker.history(period="5d", interval="1d", auto_adjust=False)
+                if not daily.empty:
+                    daily = daily[daily["Close"].notna()]
                 if not daily.empty and len(daily) >= 2:
-                    prev_close = float(daily["Close"].iloc[-2])
-                else:
-                    prev_close = float(hist["Close"].iloc[0])
+                    candidate = _safe_float(daily["Close"].iloc[-2], default=float("nan"))
+                    if _finite(candidate):
+                        prev_close = candidate
+
+            if prev_close is None:
+                first_price = _safe_float(hist["Close"].iloc[0], default=float("nan"))
+                if not _finite(first_price):
+                    return None
+                prev_close = first_price
 
             window = hist[hist["date"].isin(wanted_dates)]
-            bars = [
-                IntradayBar(timestamp=ts.to_pydatetime(), price=float(close))
-                for ts, close in zip(window.index, window["Close"])
-                if close == close  # filter NaN
-            ]
+
+            bars = []
+            for ts, close in zip(window.index, window["Close"]):
+                price = _safe_float(close, default=float("nan"))
+                if not _finite(price):
+                    continue
+                bars.append(IntradayBar(timestamp=ts.to_pydatetime(), price=price))
+
             if not bars:
                 return None
 
-            state = self._market_state(ticker)
-            return IntradaySeries(
-                symbol=symbol, bars=bars, prev_close=prev_close, market_state=state
+            log.debug(
+                "yfinance %s: returning %d bars, prev_close=%.2f",
+                symbol, len(bars), prev_close,
             )
+            return IntradaySeries(symbol=symbol, bars=bars, prev_close=prev_close)
         except Exception as e:
-            log.warning("yfinance get_intraday(%s) failed: %s", symbol, e)
+            log.warning("yfinance get_intraday(%s) failed: %s", symbol, e, exc_info=True)
             return None
-
-    @staticmethod
-    def _market_state(ticker) -> str:
-        try:
-            info = ticker.fast_info
-            # yfinance fast_info doesn't reliably expose market state.
-            # Heuristic: if last quote is within 30 min, call it REGULAR;
-            # else CLOSED. The caller will refine using its own schedule.
-            return "REGULAR"
-        except Exception:
-            return "UNKNOWN"

@@ -1,35 +1,64 @@
 """Application entry point.
 
 Usage:
-    python -m markets_display              # uses config/config.yaml
-    python -m markets_display --config path/to/other.yaml
-    python -m markets_display --windowed   # disables fullscreen for dev
+    python -m src                  # uses config/config.yaml
+    python -m src --config path/to/other.yaml
+    python -m src --windowed       # disables fullscreen for dev
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import logging.handlers
+import os
 import sys
+import threading
+import traceback
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Install exception hooks BEFORE importing Qt, so anything that blows up
+# during Qt initialization is also visible.
+# ---------------------------------------------------------------------------
+def _sys_excepthook(exc_type, exc_value, exc_tb):
+    print("=" * 70, file=sys.stderr)
+    print("UNCAUGHT EXCEPTION (main thread):", file=sys.stderr)
+    traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+    print("=" * 70, file=sys.stderr)
+    sys.stderr.flush()
+
+
+def _thread_excepthook(args):
+    print("=" * 70, file=sys.stderr)
+    print(f"UNCAUGHT EXCEPTION (thread: {args.thread.name}):", file=sys.stderr)
+    traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=sys.stderr)
+    print("=" * 70, file=sys.stderr)
+    sys.stderr.flush()
+
+
+sys.excepthook = _sys_excepthook
+threading.excepthook = _thread_excepthook
+
+from PyQt6.QtCore import qInstallMessageHandler, QtMsgType
 from PyQt6.QtWidgets import QApplication
 
 from .config import load_config
 from .main_window import MainWindow
 
 
-#  Install a Python excepthook to force errors to print
-import traceback
-
-def _excepthook(exc_type, exc_value, exc_tb):
-    print("=" * 60, file=sys.stderr)
-    print("UNCAUGHT EXCEPTION:", file=sys.stderr)
-    traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
-    print("=" * 60, file=sys.stderr)
-    sys.__excepthook__(exc_type, exc_value, exc_tb)
-
-sys.excepthook = _excepthook
+def _qt_message_handler(mode, context, message):
+    mode_name = {
+        QtMsgType.QtDebugMsg: "DEBUG",
+        QtMsgType.QtInfoMsg: "INFO",
+        QtMsgType.QtWarningMsg: "WARNING",
+        QtMsgType.QtCriticalMsg: "CRITICAL",
+        QtMsgType.QtFatalMsg: "FATAL",
+    }.get(mode, "?")
+    where = ""
+    if context is not None and context.file:
+        where = f" ({context.file}:{context.line})"
+    print(f"[Qt {mode_name}]{where} {message}", file=sys.stderr)
+    sys.stderr.flush()
 
 
 def setup_logging(cfg: dict):
@@ -52,11 +81,11 @@ def setup_logging(cfg: dict):
             )
         )
 
-    logging.basicConfig(level=level, format=fmt, handlers=handlers)
+    logging.basicConfig(level=level, format=fmt, handlers=handlers, force=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Market wall display")
+    parser = argparse.ArgumentParser(description="Markets wall display")
     default_cfg = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
     parser.add_argument("--config", default=str(default_cfg), help="Path to YAML config")
     parser.add_argument(
@@ -74,12 +103,6 @@ def main():
     log.info("Starting Market Display. Config: %s", args.config)
 
     app = QApplication(sys.argv)
-
-    # Force Qt to surface exceptions from slot handlers
-    def _qt_message_handler(mode, context, message):
-        print(f"[Qt {mode}] {message}", file=sys.stderr)
-
-    from PyQt6.QtCore import qInstallMessageHandler
     qInstallMessageHandler(_qt_message_handler)
 
     win = MainWindow(cfg)

@@ -6,12 +6,14 @@ swaps both the chart instruments and the tile instruments based on YAML.
 from __future__ import annotations
 
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCursor, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QApplication,
     QGridLayout,
     QHBoxLayout,
     QMainWindow,
@@ -68,8 +70,10 @@ class MainWindow(QMainWindow):
         self.region_timer.timeout.connect(self._check_region)
         self.region_timer.start()
 
-        # Initial population
-        self._check_region(force=True)
+        # Defer the first region check + data fetch until after the window
+        # is fully shown — calling self.screen() on an unshown window can
+        # return None on some PyQt6 builds.
+        QTimer.singleShot(0, lambda: self._check_region(force=True))
 
     # =========================================================================
     # UI construction
@@ -123,7 +127,7 @@ class MainWindow(QMainWindow):
             self.show()
         if d.get("hide_cursor", True):
             self.setCursor(QCursor(Qt.CursorShape.BlankCursor))
-        self.setWindowTitle("Market Display")
+        self.setWindowTitle("Markets Display")
 
     def _install_shortcuts(self):
         # Esc to exit fullscreen / quit (handy on the Pi)
@@ -138,9 +142,21 @@ class MainWindow(QMainWindow):
             self.showFullScreen()
 
     def _scaled(self, px_at_1080p: int) -> int:
-        """Scale a 1080p-baseline pixel size to the actual screen height."""
-        screen = self.screen() if hasattr(self, "screen") else None
-        h = screen.size().height() if screen else 1080
+        """Scale a 1080p-baseline pixel size to the actual screen height.
+
+        Hardened against early-call cases where self.screen() returns None
+        (window not yet shown) or raises."""
+        h = 1080
+        try:
+            screen = self.screen()
+            if screen is None:
+                screen = QApplication.primaryScreen()
+            if screen is not None:
+                size = screen.size()
+                if size is not None and size.height() > 0:
+                    h = size.height()
+        except Exception as e:
+            log.debug("_scaled: falling back to 1080p baseline (%s)", e)
         factor = h / 1080.0
         return max(1, int(round(px_at_1080p * factor)))
 
@@ -148,14 +164,17 @@ class MainWindow(QMainWindow):
     # Region switching
     # =========================================================================
     def _check_region(self, force: bool = False):
-        active = self.scheduler.active()
-        if not force and active.name == self.active_region:
-            return
-        log.info("Switching to region: %s", active.name)
-        self.active_region = active.name
-        self._load_chart_set(active.chart_set)
-        self._load_tile_set(active.tile_set)
-        self._refresh_all()
+        try:
+            active = self.scheduler.active()
+            if not force and active.name == self.active_region:
+                return
+            log.info("Switching to region: %s", active.name)
+            self.active_region = active.name
+            self._load_chart_set(active.chart_set)
+            self._load_tile_set(active.tile_set)
+            self._refresh_all()
+        except Exception:
+            log.error("_check_region crashed:\n%s", traceback.format_exc())
 
     def _clear_layout(self, layout):
         while layout.count():
@@ -177,6 +196,7 @@ class MainWindow(QMainWindow):
             self.charts_layout.addWidget(panel, stretch=1)
             self.chart_panels.append(panel)
             self.chart_instruments.append(inst)
+        log.debug("Loaded %d chart panels for set=%s", len(instruments), set_name)
 
     def _load_tile_set(self, set_name: str):
         instruments = self.config.get("tiles", {}).get(set_name, [])
@@ -199,6 +219,7 @@ class MainWindow(QMainWindow):
             self.tiles_layout.addWidget(w, row, col)
             self.tile_widgets.append(w)
             self.tile_instruments.append(inst)
+        log.debug("Loaded %d tiles for set=%s", len(instruments), set_name)
 
     # =========================================================================
     # Data refresh
@@ -208,12 +229,14 @@ class MainWindow(QMainWindow):
         self._refresh_tiles()
 
     def _refresh_charts(self):
+        log.debug("Refreshing %d charts", len(self.chart_instruments))
         for idx, inst in enumerate(self.chart_instruments):
             key = f"chart:{idx}"
             self.data.request_quote(key, inst)
             self.data.request_intraday(key, inst, 2)
 
     def _refresh_tiles(self):
+        log.debug("Refreshing %d tiles", len(self.tile_instruments))
         for idx, inst in enumerate(self.tile_instruments):
             key = f"tile:{idx}"
             self.data.request_quote(key, inst)
@@ -222,19 +245,25 @@ class MainWindow(QMainWindow):
     # Slots from DataService
     # =========================================================================
     def _on_quote(self, key: str, quote):
-        kind, idx_str = key.split(":")
-        idx = int(idx_str)
-        is_closed = self._is_market_closed_for_active_region()
-        if kind == "chart" and idx < len(self.chart_panels):
-            self.chart_panels[idx].update_quote(quote, is_closed=is_closed)
-        elif kind == "tile" and idx < len(self.tile_widgets):
-            self.tile_widgets[idx].set_quote(quote, is_closed=False)
+        try:
+            kind, idx_str = key.split(":")
+            idx = int(idx_str)
+            is_closed = self._is_market_closed_for_active_region()
+            if kind == "chart" and idx < len(self.chart_panels):
+                self.chart_panels[idx].update_quote(quote, is_closed=is_closed)
+            elif kind == "tile" and idx < len(self.tile_widgets):
+                self.tile_widgets[idx].set_quote(quote, is_closed=False)
+        except Exception:
+            log.error("_on_quote(%s) crashed:\n%s", key, traceback.format_exc())
 
     def _on_series(self, key: str, series):
-        kind, idx_str = key.split(":")
-        idx = int(idx_str)
-        if kind == "chart" and idx < len(self.chart_panels):
-            self.chart_panels[idx].update_series(series)
+        try:
+            kind, idx_str = key.split(":")
+            idx = int(idx_str)
+            if kind == "chart" and idx < len(self.chart_panels):
+                self.chart_panels[idx].update_series(series)
+        except Exception:
+            log.error("_on_series(%s) crashed:\n%s", key, traceback.format_exc())
 
     def _is_market_closed_for_active_region(self) -> bool:
         """Weekend = closed for North America. (Asia/Europe weekend rules vary;
@@ -245,5 +274,6 @@ class MainWindow(QMainWindow):
 
     # =========================================================================
     def closeEvent(self, ev):
+        log.info("Window closeEvent — shutting down DataService.")
         self.data.stop()
         super().closeEvent(ev)
