@@ -1,0 +1,213 @@
+# =============================================================================
+# Market Display Configuration
+# =============================================================================
+# All user-tunable settings live here. The Python code reads this on startup
+# and on SIGHUP (or on the configured reload interval).
+#
+# Symbols: each instrument has a `symbols` block keyed by provider, so the
+# same logical instrument can have different tickers per data vendor.
+# =============================================================================
+
+display:
+  # "auto" detects the screen size at startup. Override with "1920x1080" or
+  # "3840x2160" if you want to force a size (useful for windowed testing).
+  resolution: auto
+
+  # Fullscreen kiosk mode. Set false during development to get a normal window.
+  fullscreen: true
+
+  # Hide the OS mouse cursor (wall-display mode).
+  hide_cursor: true
+
+  # Base font size in points at 1080p. Scales linearly with resolution height
+  # (so on 4K, fonts double automatically). Tweak this if text is too small/big.
+  base_font_pt: 14
+
+  # Background color of the whole window.
+  background: "#0A0E1A"
+
+# -----------------------------------------------------------------------------
+# Colors used by charts and tiles
+# -----------------------------------------------------------------------------
+colors:
+  up: "#00D964"             # bright green for gains
+  up_fill: "#00D96433"      # translucent green for area under line
+  down: "#FF3B3B"           # red for losses
+  down_fill: "#FF3B3B33"
+  neutral: "#888888"
+  banner_bg: "#1A1F2E"      # banner strip at top of each chart
+  banner_text: "#FFFFFF"
+  axis: "#3A4255"           # axis tick labels
+  grid: "#1F2533"           # subtle grid lines
+  prev_close_line: "#FFB800" # amber dashed line at previous day's close
+  tile_bg: "#141A26"
+  tile_border: "#252C3E"
+  closed_badge_bg: "#FF8A00"
+  closed_badge_text: "#0A0E1A"
+
+# -----------------------------------------------------------------------------
+# Layout: how the screen is divided
+# -----------------------------------------------------------------------------
+layout:
+  # Fraction of vertical space given to the chart row (top).
+  # The bottom ticker takes the remainder.
+  charts_height_fraction: 0.62
+
+  # Padding inside the window (in pixels at 1080p; scales with resolution).
+  outer_padding: 24
+  chart_gap: 16
+  tile_gap: 10
+
+  # Bottom ticker grid: number of columns. Rows are computed from the
+  # number of instruments under `tiles.symbols`.
+  tile_columns: 4
+
+# -----------------------------------------------------------------------------
+# Update / refresh behavior
+# -----------------------------------------------------------------------------
+refresh:
+  chart_seconds: 60         # how often charts refresh
+  tile_seconds: 60          # how often bottom tiles refresh
+  config_reload_seconds: 300 # re-read this YAML every N seconds (0 = never)
+
+# -----------------------------------------------------------------------------
+# Region schedule (all times Pacific). Each region declares which chart set
+# and which tile set is "primary" during its window.
+#
+# Times are 24-hour HH:MM in America/Los_Angeles. The day wraps at midnight.
+# -----------------------------------------------------------------------------
+schedule:
+  timezone: "America/Los_Angeles"
+  windows:
+    - name: north_america
+      start: "06:30"
+      end:   "17:00"
+      chart_set: north_america
+      tile_set: north_america
+
+    - name: asia
+      start: "17:00"
+      end:   "00:00"
+      chart_set: asia
+      tile_set: asia
+
+    - name: europe
+      start: "00:00"
+      end:   "06:30"
+      chart_set: europe
+      tile_set: europe
+
+# -----------------------------------------------------------------------------
+# Data providers. The first provider in `order` that successfully returns
+# data wins. Per-instrument overrides live in the instrument's `provider` key.
+# -----------------------------------------------------------------------------
+providers:
+  order: [yfinance, eodhd]
+
+  yfinance:
+    enabled: true
+    # yfinance has no API key. Intraday quote freshness is ~15 min delayed
+    # for most US indices. Plenty for a wall display.
+
+  eodhd:
+    enabled: true
+    # API key comes from env var EODHD_API_KEY (or .env file). Do NOT put it here.
+    base_url: "https://eodhistoricaldata.com/api"
+    # The "All World" subscription is end-of-day; we use it primarily for the
+    # previous-day close on charts and for static tile pricing.
+
+# -----------------------------------------------------------------------------
+# CHARTS: three top-row charts per region. List exactly 3 per chart_set.
+#
+# Each entry:
+#   name:        Long display name shown in the banner
+#   short:       Short label (4 chars max ideal) sometimes used in compact UI
+#   provider:    (optional) force a specific provider for this instrument
+#   symbols:     ticker per provider — code uses whichever provider is active
+# -----------------------------------------------------------------------------
+charts:
+  north_america:
+    - name: "DOW INDUSTRIALS"
+      short: "DJI"
+      symbols: { yfinance: "^DJI",  eodhd: "DJI.INDX" }
+
+    - name: "S&P 500"
+      short: "SPX"
+      symbols: { yfinance: "^GSPC", eodhd: "GSPC.INDX" }
+
+    - name: "NASDAQ COMPOSITE"
+      short: "IXIC"
+      symbols: { yfinance: "^IXIC", eodhd: "IXIC.INDX" }
+
+  asia:
+    - name: "NIKKEI 225"
+      short: "N225"
+      symbols: { yfinance: "^N225", eodhd: "N225.INDX" }
+
+    - name: "HANG SENG"
+      short: "HSI"
+      symbols: { yfinance: "^HSI",  eodhd: "HSI.INDX" }
+
+    - name: "SHANGHAI COMPOSITE"
+      short: "SSEC"
+      symbols: { yfinance: "000001.SS", eodhd: "000001.SHG" }
+
+  europe:
+    - name: "FTSE 100"
+      short: "UKX"
+      symbols: { yfinance: "^FTSE", eodhd: "FTSE.INDX" }
+
+    - name: "DAX"
+      short: "DAX"
+      symbols: { yfinance: "^GDAXI", eodhd: "GDAXI.INDX" }
+
+    - name: "CAC 40"
+      short: "CAC"
+      symbols: { yfinance: "^FCHI", eodhd: "FCHI.INDX" }
+
+# -----------------------------------------------------------------------------
+# TILES: bottom-row tiles per region. Each tile is the CNBC-style banner
+# (name, price, change, % change) without the chart.
+#
+# `decimals`: how many decimal places to show (treasuries often want 3).
+# `unit`: optional suffix on the price (e.g., "%" for yields).
+# -----------------------------------------------------------------------------
+tiles:
+  north_america:
+    - { name: "2Y TREASURY",  symbols: { yfinance: "^IRX" },  decimals: 3, unit: "%" }
+    - { name: "10Y TREASURY", symbols: { yfinance: "^TNX" },  decimals: 3, unit: "%" }
+    - { name: "30Y TREASURY", symbols: { yfinance: "^TYX" },  decimals: 3, unit: "%" }
+    - { name: "AAPL",  symbols: { yfinance: "AAPL",  eodhd: "AAPL.US"  }, decimals: 2 }
+    - { name: "MSFT",  symbols: { yfinance: "MSFT",  eodhd: "MSFT.US"  }, decimals: 2 }
+    - { name: "NVDA",  symbols: { yfinance: "NVDA",  eodhd: "NVDA.US"  }, decimals: 2 }
+    - { name: "GOOGL", symbols: { yfinance: "GOOGL", eodhd: "GOOGL.US" }, decimals: 2 }
+    - { name: "TSLA",  symbols: { yfinance: "TSLA",  eodhd: "TSLA.US"  }, decimals: 2 }
+
+  asia:
+    - { name: "USD/JPY", symbols: { yfinance: "JPY=X"   }, decimals: 2 }
+    - { name: "USD/CNY", symbols: { yfinance: "CNY=X"   }, decimals: 2 }
+    - { name: "NIKKEI FUT", symbols: { yfinance: "NKD=F" }, decimals: 2 }
+    - { name: "TSM",     symbols: { yfinance: "TSM",  eodhd: "TSM.US"  }, decimals: 2 }
+    - { name: "BABA",    symbols: { yfinance: "BABA", eodhd: "BABA.US" }, decimals: 2 }
+    - { name: "SONY",    symbols: { yfinance: "SONY", eodhd: "SONY.US" }, decimals: 2 }
+    - { name: "TOYOTA",  symbols: { yfinance: "TM",   eodhd: "TM.US"   }, decimals: 2 }
+    - { name: "GOLD",    symbols: { yfinance: "GC=F" }, decimals: 2 }
+
+  europe:
+    - { name: "EUR/USD",  symbols: { yfinance: "EURUSD=X" },          decimals: 4 }
+    - { name: "GBP/USD",  symbols: { yfinance: "GBPUSD=X" },          decimals: 4 }
+    - { name: "USD/CHF",  symbols: { yfinance: "CHF=X"    },          decimals: 4 }
+    - { name: "ASML",     symbols: { yfinance: "ASML", eodhd: "ASML.US" }, decimals: 2 }
+    - { name: "NESTLE",   symbols: { yfinance: "NSRGY", eodhd: "NSRGY.US" }, decimals: 2 }
+    - { name: "NOVO",     symbols: { yfinance: "NVO", eodhd: "NVO.US" },  decimals: 2 }
+    - { name: "BRENT",    symbols: { yfinance: "BZ=F" },              decimals: 2 }
+    - { name: "GOLD",     symbols: { yfinance: "GC=F" },              decimals: 2 }
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+logging:
+  level: DEBUG              # DEBUG | INFO | WARNING | ERROR
+  file: "logs/markets_display.log"
+  max_bytes: 5242880       # 5 MB
+  backup_count: 3

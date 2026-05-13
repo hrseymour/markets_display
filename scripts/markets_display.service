@@ -1,0 +1,24 @@
+[Unit]
+Description=Market Display Wall App
+After=graphical.target network-online.target
+Wants=graphical.target network-online.target
+
+[Service]
+Type=simple
+User=harlan
+Group=harlan
+
+# Edit these paths if you install elsewhere:
+WorkingDirectory=/home/harlan/repos/markets_display
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/home/harlan/.Xauthority"
+Environment="PYTHONUNBUFFERED=1"
+EnvironmentFile=-/home/harlan/repos/markets_display/.env
+
+ExecStart=/home/harlan/repos/markets_display/.venv/bin/python -m market_display
+
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=graphical.target
