@@ -98,6 +98,85 @@ schedule:
       tile_set: europe
 
 # -----------------------------------------------------------------------------
+# Markets: name -> { timezone, sessions: [...] }
+#
+# Each chart instrument can reference one of these by name (via its `market:`
+# key). The chart then positions its line along an x-axis representing that
+# market's full trading day (from open of first session to close of last
+# session). Lunch breaks render as flat segments — the chart treats the
+# gross window as one block.
+#
+# When the market is closed (weekend, holiday, after-hours, pre-market), the
+# chart shows the most recent session that has data, filling the chart, and
+# a "CLOSED" badge appears in the chart's banner.
+#
+# Sessions are in the market's local time (HH:MM, 24-hour).
+# -----------------------------------------------------------------------------
+markets:
+  US:
+    timezone: "America/New_York"
+    sessions:
+      - { open: "09:30", close: "16:00" }
+
+  CA:
+    timezone: "America/Toronto"
+    sessions:
+      - { open: "09:30", close: "16:00" }
+
+  MX:
+    timezone: "America/Mexico_City"
+    sessions:
+      - { open: "08:30", close: "15:00" }
+
+  JP:
+    timezone: "Asia/Tokyo"
+    sessions:
+      - { open: "09:00", close: "11:30" }
+      - { open: "12:30", close: "15:30" }
+
+  HK:
+    timezone: "Asia/Hong_Kong"
+    sessions:
+      - { open: "09:30", close: "12:00" }
+      - { open: "13:00", close: "16:00" }
+
+  KR:
+    timezone: "Asia/Seoul"
+    sessions:
+      - { open: "09:00", close: "15:30" }
+
+  CN:
+    timezone: "Asia/Shanghai"
+    sessions:
+      - { open: "09:30", close: "11:30" }
+      - { open: "13:00", close: "15:00" }
+
+  UK:
+    timezone: "Europe/London"
+    sessions:
+      - { open: "08:00", close: "16:30" }
+
+  DE:
+    timezone: "Europe/Berlin"
+    sessions:
+      - { open: "09:00", close: "17:30" }
+
+  FR:
+    timezone: "Europe/Paris"
+    sessions:
+      - { open: "09:00", close: "17:30" }
+
+  IT:
+    timezone: "Europe/Rome"
+    sessions:
+      - { open: "09:00", close: "17:30" }
+
+  AU:
+    timezone: "Australia/Sydney"
+    sessions:
+      - { open: "10:00", close: "16:00" }
+
+# -----------------------------------------------------------------------------
 # Data providers. The first provider in `order` that successfully returns
 # data wins. Per-instrument overrides live in the instrument's `provider` key.
 # -----------------------------------------------------------------------------
@@ -122,6 +201,9 @@ providers:
 # Each entry:
 #   name:        Long display name shown in the banner
 #   short:       Short label (4 chars max ideal) sometimes used in compact UI
+#   market:      Name from the `markets:` block above. Drives x-axis position
+#                (fills as the trading day progresses) and the CLOSED badge.
+#                Omit to fall back to legacy fill-the-chart behavior.
 #   provider:    (optional) force a specific provider for this instrument
 #   symbols:     ticker per provider — code uses whichever provider is active
 # -----------------------------------------------------------------------------
@@ -129,40 +211,49 @@ charts:
   north_america:
     - name: "S&P 500"
       short: "SPX"
+      market: US
       symbols: { yfinance: "^GSPC", eodhd: "GSPC.INDX" }
 
     - name: "NASDAQ"
       short: "IXIC"
+      market: US
       symbols: { yfinance: "^IXIC", eodhd: "IXIC.INDX" }
 
     - name: "RUSSELL 2000"
       short: "RUT"
-      symbols: { yfinance: "^RUT", eodhd: "IXIC.INDX" }
+      market: US
+      symbols: { yfinance: "^RUT", eodhd: "RUT.INDX" }
 
   asia:
     - name: "NIKKEI 225"
       short: "N225"
+      market: JP
       symbols: { yfinance: "^N225", eodhd: "N225.INDX" }
 
     - name: "HANG SENG"
       short: "HSI"
+      market: HK
       symbols: { yfinance: "^HSI",  eodhd: "HSI.INDX" }
 
     - name: "SHANGHAI COMPOSITE"
       short: "SSEC"
+      market: CN
       symbols: { yfinance: "000001.SS", eodhd: "000001.SHG" }
 
   europe:
     - name: "FTSE 100"
       short: "UKX"
+      market: UK
       symbols: { yfinance: "^FTSE", eodhd: "FTSE.INDX" }
 
     - name: "DAX"
       short: "DAX"
+      market: DE
       symbols: { yfinance: "^GDAXI", eodhd: "GDAXI.INDX" }
 
     - name: "CAC 40"
       short: "CAC"
+      market: FR
       symbols: { yfinance: "^FCHI", eodhd: "FCHI.INDX" }
 
 # -----------------------------------------------------------------------------
@@ -174,9 +265,9 @@ charts:
 # -----------------------------------------------------------------------------
 tiles:
   north_america:
+    - { name: "NASDAQ 100",  symbols: { yfinance: "^NDX",  eodhd: "NDX.INDX"  }, decimals: 2 }
     - { name: "AMZN", symbols: { yfinance: "AMZN", eodhd: "AMZN.US" }, decimals: 2 }
     - { name: "GOOG", symbols: { yfinance: "GOOG", eodhd: "GOOG.US" }, decimals: 2 }
-    - { name: "META",  symbols: { yfinance: "META",  eodhd: "META.US"  }, decimals: 2 }
     - { name: "BRK-B",  symbols: { yfinance: "BRK-B",  eodhd: "BRK-B.US"  }, decimals: 2 }
     - { name: "13W T-BILL",  symbols: { yfinance: "^IRX" },  decimals: 3, unit: "%" }
     - { name: "5Y TREAS",  symbols: { yfinance: "^FVX" },  decimals: 3, unit: "%" }

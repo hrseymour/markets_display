@@ -1,7 +1,10 @@
 """Main window. Charts row on top, tiles grid on bottom.
 
-When the active region changes (e.g. North America → Asia), the window
-swaps both the chart instruments and the tile instruments based on YAML.
+When the active region changes, the window swaps both the chart
+instruments and the tile instruments based on YAML. Each chart instrument
+may declare a `market:` key referencing the top-level `markets:` block;
+the chart then knows what timezone and session apply, and positions bars
+along an x-axis that represents that market's trading day.
 
 Data fetching is asynchronous via DataService (thread-pool based).
 """
@@ -10,7 +13,7 @@ from __future__ import annotations
 import logging
 import traceback
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QCursor, QKeySequence, QShortcut
@@ -24,6 +27,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .data_service import DataService
+from .markets import Market, load_markets
 from .providers import IntradaySeries, ProviderDispatcher, Quote
 from .scheduler import Scheduler
 from .theme import Theme
@@ -38,6 +42,8 @@ class MainWindow(QMainWindow):
         self.config = config
         self.theme = Theme.from_config(config)
         self.scheduler = Scheduler(config["schedule"])
+        self.markets: Dict[str, Market] = load_markets(config.get("markets", {}))
+        log.info("Loaded %d markets: %s", len(self.markets), list(self.markets.keys()))
         self.dispatcher = ProviderDispatcher(config.get("providers", {}))
         self.data = DataService(self.dispatcher)
         self.data.quote_ready.connect(self._on_quote)
@@ -68,6 +74,14 @@ class MainWindow(QMainWindow):
         self.region_timer.setInterval(30_000)
         self.region_timer.timeout.connect(self._check_region)
         self.region_timer.start()
+
+        # Re-paint chart banners every minute so the CLOSED badge appears
+        # promptly when a market crosses its open/close boundary, even if
+        # no new data has arrived.
+        self.market_state_timer = QTimer(self)
+        self.market_state_timer.setInterval(30_000)
+        self.market_state_timer.timeout.connect(self._refresh_chart_states)
+        self.market_state_timer.start()
 
         QTimer.singleShot(0, lambda: self._check_region(force=True))
 
@@ -167,6 +181,18 @@ class MainWindow(QMainWindow):
             if w:
                 w.deleteLater()
 
+    def _resolve_market(self, instrument: dict) -> Optional[Market]:
+        name = instrument.get("market")
+        if not name:
+            return None
+        m = self.markets.get(name)
+        if m is None:
+            log.warning(
+                "Instrument %r references unknown market %r",
+                instrument.get("name"), name,
+            )
+        return m
+
     def _load_chart_set(self, set_name: str):
         instruments = self.config.get("charts", {}).get(set_name, [])
         self._clear_layout(self.charts_layout)
@@ -174,7 +200,8 @@ class MainWindow(QMainWindow):
         self.chart_instruments = []
         banner_h = self._scaled(96)
         for inst in instruments:
-            panel = ChartPanel(self.theme, inst)
+            market = self._resolve_market(inst)
+            panel = ChartPanel(self.theme, inst, market=market)
             panel.banner.setMinimumHeight(banner_h)
             panel.banner.setMaximumHeight(banner_h)
             self.charts_layout.addWidget(panel, stretch=1)
@@ -223,14 +250,21 @@ class MainWindow(QMainWindow):
             key = f"tile:{idx}"
             self.data.request_quote(key, inst)
 
+    def _refresh_chart_states(self):
+        """Repaint chart banners so the CLOSED badge updates near boundaries."""
+        for panel in self.chart_panels:
+            # Re-applying the existing quote re-evaluates is_closed via market
+            panel.update_quote(panel.banner.quote, is_closed=None)
+            panel.chart.update()
+
     # =========================================================================
     def _on_quote(self, key: str, quote):
         try:
             kind, idx_str = key.split(":")
             idx = int(idx_str)
-            is_closed = self._is_market_closed_for_active_region()
             if kind == "chart" and idx < len(self.chart_panels):
-                self.chart_panels[idx].update_quote(quote, is_closed=is_closed)
+                # Pass None so the panel derives is_closed from the Market
+                self.chart_panels[idx].update_quote(quote, is_closed=None)
             elif kind == "tile" and idx < len(self.tile_widgets):
                 self.tile_widgets[idx].set_quote(quote, is_closed=False)
         except Exception:
@@ -244,11 +278,6 @@ class MainWindow(QMainWindow):
                 self.chart_panels[idx].update_series(series)
         except Exception:
             log.error("_on_series(%s) crashed:\n%s", key, traceback.format_exc())
-
-    def _is_market_closed_for_active_region(self) -> bool:
-        if self.active_region != "north_america":
-            return False
-        return datetime.now().weekday() >= 5
 
     def closeEvent(self, ev):
         log.info("Window closeEvent — shutting down DataService.")

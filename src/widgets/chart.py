@@ -1,30 +1,36 @@
 """Single-day line chart with a dashed previous-close reference line.
 
-Minimal CNBC-style look:
-- Dark background (matches the surrounding window).
-- White Y-axis tick labels on the left.
-- No fill below the line — just the colored line.
-- Segment coloring with INTERPOLATED crossings at the reference line.
-- One dashed amber reference line at yesterday's close. No label — the
-  reference value is implied by the banner's prev_close above the chart.
-- "Nice" rounded y-axis tick values (multiples of 10, 25, 50, 100, etc.)
-- No date label below the chart (it's always today's session).
-- Visible grid lines — recessed but readable.
+Market-aware x-axis:
+- When the market is OPEN, the chart x-axis represents today's full
+  trading session. Bars are positioned at their real time fraction, so
+  at 10:00 ET (30 min into the US session) the line covers ~7.7% of the
+  chart width — empty space to the right.
+- When the market is CLOSED (weekend, holiday, after-hours, pre-market),
+  the chart shows the most recent session that has data, filling the
+  whole chart. A "MARKET CLOSED" badge sits in the chart's banner.
+- If no Market is associated with the chart, falls back to the legacy
+  behavior: bars fill the chart left-to-right by index.
 
-NaN/inf protection throughout: feeding non-finite coordinates to QPainter
-causes a native segfault with no Python traceback.
+Visuals:
+- Dark background. White Y-axis tick labels on the left.
+- No fill below the line.
+- Segment coloring with INTERPOLATED crossings at the reference line.
+- One dashed amber reference line at yesterday's close.
+- "Nice" rounded y-axis tick values.
+- Visible grid lines.
 """
 from __future__ import annotations
 
 import logging
 import math
-from datetime import date as date_t
+from datetime import date as date_t, datetime
 from typing import List, Optional, Tuple
 
 from PyQt6.QtCore import QPointF, Qt, QRectF
 from PyQt6.QtGui import QBrush, QColor, QFont, QPainter, QPainterPath, QPen
 from PyQt6.QtWidgets import QWidget
 
+from ..markets import Market
 from ..providers import IntradaySeries
 from ..providers.base import IntradayBar
 from ..theme import Theme
@@ -32,11 +38,10 @@ from ..theme import Theme
 log = logging.getLogger(__name__)
 
 
-# Colors tuned for the dark background.
-GRID_LINE = QColor("#2E3548")     # visible-but-recessed grid
-AXIS_TEXT = QColor("#FFFFFF")     # bright white tick labels
-UP_LINE = QColor("#00D964")       # CNBC-style bright green
-DOWN_LINE = QColor("#FF3B3B")     # CNBC-style bright red
+GRID_LINE = QColor("#2E3548")
+AXIS_TEXT = QColor("#FFFFFF")
+UP_LINE = QColor("#00D964")
+DOWN_LINE = QColor("#FF3B3B")
 
 
 def _finite(x) -> bool:
@@ -53,11 +58,6 @@ def _with_alpha(c: QColor, alpha_byte: int) -> QColor:
 
 
 def _nice_ticks(lo: float, hi: float, target_count: int = 5) -> List[float]:
-    """Return a list of 'nice' tick values covering [lo, hi].
-
-    Uses the standard 1-2-5 progression. The returned ticks may extend
-    slightly beyond [lo, hi] at the ends — the caller filters those.
-    """
     if not (_finite(lo) and _finite(hi)) or hi <= lo:
         return []
     raw_step = (hi - lo) / max(1, target_count)
@@ -85,14 +85,19 @@ def _nice_ticks(lo: float, hi: float, target_count: int = 5) -> List[float]:
 
 
 class LineChart(QWidget):
-    def __init__(self, theme: Theme, parent=None):
+    def __init__(self, theme: Theme, market: Optional[Market] = None, parent=None):
         super().__init__(parent)
         self.theme = theme
+        self.market = market
         self.series: Optional[IntradaySeries] = None
         self.setMinimumHeight(120)
 
     def set_series(self, series: Optional[IntradaySeries]):
         self.series = series
+        self.update()
+
+    def set_market(self, market: Optional[Market]):
+        self.market = market
         self.update()
 
     # -------------------------------------------------------------------------
@@ -120,18 +125,23 @@ class LineChart(QWidget):
                 self._draw_empty(p, rect, "No data")
                 return
 
-            # Only the most recent session
-            last_date = clean_bars[-1].timestamp.date()
-            session_bars = [b for b in clean_bars if b.timestamp.date() == last_date]
+            target_date = self._choose_session_date(clean_bars)
+            session_bars = [b for b in clean_bars if b.timestamp.date() == target_date]
             if not session_bars:
                 self._draw_empty(p, rect, "No data")
                 return
 
-            anchor = self.series.prev_closes_by_date.get(last_date)
+            anchor = self.series.prev_closes_by_date.get(target_date)
             if anchor is None or not _finite(anchor):
                 anchor = self.series.prev_close if _finite(self.series.prev_close) else None
 
-            self._draw_chart(p, rect, session_bars, anchor)
+            use_market_layout = (
+                self.market is not None
+                and self._is_today_in_market(target_date)
+                and self.market.is_open()
+            )
+
+            self._draw_chart(p, rect, session_bars, anchor, use_market_layout)
         finally:
             p.end()
 
@@ -141,6 +151,36 @@ class LineChart(QWidget):
             return []
         return [b for b in bars if _finite(b.price)]
 
+    def _is_today_in_market(self, d: date_t) -> bool:
+        if self.market is None:
+            return False
+        try:
+            return d == self.market.local_date_today()
+        except Exception:
+            return False
+
+    def _choose_session_date(self, bars: List[IntradayBar]) -> date_t:
+        present_dates = []
+        seen = set()
+        for b in bars:
+            d = b.timestamp.date()
+            if d not in seen:
+                seen.add(d)
+                present_dates.append(d)
+        present_dates.sort()
+        if not present_dates:
+            return bars[-1].timestamp.date()
+
+        if self.market is not None:
+            try:
+                today_local = self.market.local_date_today()
+                if today_local in seen and self.market.is_open():
+                    return today_local
+            except Exception:
+                pass
+
+        return present_dates[-1]
+
     # -------------------------------------------------------------------------
     def _draw_chart(
         self,
@@ -148,6 +188,7 @@ class LineChart(QWidget):
         rect,
         bars: List[IntradayBar],
         anchor: Optional[float],
+        use_market_layout: bool,
     ):
         prices = [b.price for b in bars]
         lo = min(prices)
@@ -169,8 +210,6 @@ class LineChart(QWidget):
         ch = rect.height()
         axis_px = max(10, int(ch * 0.032))
 
-        # Tight right margin (just enough so the end-point dot doesn't clip)
-        # and no bottom margin for a date label.
         left_margin = max(72, int(rect.width() * 0.07))
         right_margin = 12
         top_margin = 10
@@ -187,13 +226,16 @@ class LineChart(QWidget):
         if n < 2:
             return
 
-        def x_for(i: int) -> float:
-            return plot_rect.left() + (i / (n - 1)) * plot_rect.width()
+        if use_market_layout and self.market is not None:
+            def x_for(i: int) -> float:
+                frac = self.market.fraction_for(bars[i].timestamp)
+                return plot_rect.left() + frac * plot_rect.width()
+        else:
+            def x_for(i: int) -> float:
+                return plot_rect.left() + (i / (n - 1)) * plot_rect.width()
 
-        # Y-axis grid + labels
         self._draw_y_axis(p, plot_rect, lo, hi, axis_px)
 
-        # Dashed reference line (no label on the right)
         ref = anchor if (anchor is not None and _finite(anchor)) else None
         y_anchor = self._y(ref, lo, hi, plot_rect) if ref is not None else None
 
@@ -207,7 +249,6 @@ class LineChart(QWidget):
                 QPointF(plot_rect.right(), y_anchor),
             )
 
-        # Pre-compute screen coords
         coords: List[Tuple[float, float]] = []
         for i, b in enumerate(bars):
             x = x_for(i)
@@ -217,7 +258,6 @@ class LineChart(QWidget):
             else:
                 coords.append((x, y))
 
-        # Draw the line with INTERPOLATED color crossings at the anchor.
         pen_up = QPen(UP_LINE, 1.8)
         pen_up.setCapStyle(Qt.PenCapStyle.RoundCap)
         pen_up.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -243,7 +283,6 @@ class LineChart(QWidget):
                 p.setPen(pen_up if p0_up else pen_down)
                 p.drawLine(QPointF(x0, y0), QPointF(x1, y1))
             else:
-                # Interpolate to find the exact screen crossing point
                 dy = y1 - y0
                 if abs(dy) < 1e-9:
                     p.setPen(pen_up if p0_up else pen_down)
@@ -258,7 +297,6 @@ class LineChart(QWidget):
                 p.setPen(pen_up if p1_up else pen_down)
                 p.drawLine(QPointF(xc, yc), QPointF(x1, y1))
 
-        # End-point dot
         end_x, end_y = coords[-1]
         if _finite(end_x) and _finite(end_y):
             if ref is not None and _finite(ref):
@@ -297,7 +335,6 @@ class LineChart(QWidget):
             grid_pen.setStyle(Qt.PenStyle.SolidLine)
             p.setPen(grid_pen)
             p.drawLine(QPointF(plot_rect.left(), y), QPointF(plot_rect.right(), y))
-            # White label outside the plot, on the dark window background
             p.setPen(AXIS_TEXT)
             label_h = px + 4
             p.drawText(
