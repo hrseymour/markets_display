@@ -87,15 +87,30 @@ schedule:
 
     - name: asia
       start: "17:00"
-      end:   "00:00"
+      end:   "01:00"
       chart_set: asia
       tile_set: asia
 
     - name: europe
-      start: "00:00"
+      start: "01:00"
       end:   "06:30"
       chart_set: europe
       tile_set: europe
+
+# | Country   | Main exchange   | Local trading hours                 | Pacific Time                                     | Trading hours  |
+# |-----------|-----------------|-------------------------------------|--------------------------------------------------|----------------|
+# | US        | NYSE/Nasdaq     | 9:30 AM–4:00 PM                     | 6:30 AM–1:00 PM                                  | 6.5            |
+# | Canada    | TSX             | 9:30 AM–4:00 PM                     | 6:30 AM–1:00 PM                                  | 6.5            |
+# | Mexico    | BMV             | 8:30 AM–3:00 PM                     | 7:30 AM–2:00 PM                                  | 6.5            |
+# | Japan     | Tokyo/JPX       | 9:00–11:30 AM, 12:30–3:30 PM        | 5:00–7:30 PM, 8:30–11:30 PM previous day         | 5.5            |
+# | Hong Kong | HKEX            | 9:30 AM–12:00 PM, 1:00–4:00 PM      | 6:30–9:00 PM, 10:00 PM–1:00 AM previous day      | 5.5            |
+# | S. Korea  | KRX             | 9:00 AM–3:30 PM                     | 5:00–11:30 PM previous day                       | 6.5            |
+# | China     | Shanghai/SSE    | 9:30–11:30 AM, 1:00–3:00 PM         | 6:30–8:30 PM, 10:00 PM–12:00 AM previous day     | 4.0            |
+# | UK        | LSE             | 8:00 AM–4:30 PM                     | 12:00–8:30 AM                                    | 8.5            |
+# | France    | Euronext Paris  | 9:00 AM–5:30 PM                     | 12:00–8:30 AM                                    | 8.5            |
+# | Germany   | Xetra           | 9:00 AM–5:30 PM                     | 12:00–8:30 AM                                    | 8.5            |
+# | Italy     | Borsa Italiana  | 9:00 AM–5:30 PM                     | 12:00–8:30 AM                                    | 8.5            |
+# | Australia | ASX             | 10:00 AM–4:00 PM                    | 5:00–11:00 PM previous day                       | 6.0            |
 
 # -----------------------------------------------------------------------------
 # Markets: name -> { timezone, sessions: [...] }
@@ -275,24 +290,24 @@ tiles:
     - { name: "30Y TREAS", symbols: { yfinance: "^TYX" },  decimals: 3, unit: "%" }
 
   asia:
-    - { name: "USD/JPY", symbols: { yfinance: "JPY=X"   }, decimals: 2 }
-    - { name: "USD/CNY", symbols: { yfinance: "CNY=X"   }, decimals: 2 }
-    - { name: "NIKKEI FUT", symbols: { yfinance: "NKD=F" }, decimals: 2 }
-    - { name: "TSM",     symbols: { yfinance: "TSM",  eodhd: "TSM.US"  }, decimals: 2 }
-    - { name: "BABA",    symbols: { yfinance: "BABA", eodhd: "BABA.US" }, decimals: 2 }
-    - { name: "SONY",    symbols: { yfinance: "SONY", eodhd: "SONY.US" }, decimals: 2 }
-    - { name: "TOYOTA",  symbols: { yfinance: "TM",   eodhd: "TM.US"   }, decimals: 2 }
-    - { name: "GOLD",    symbols: { yfinance: "GC=F" }, decimals: 2 }
+    - { name: "MARUBENI",  symbols: { yfinance: "8002.T" }, decimals: 0 }
+    - { name: "MITSUBISHI", symbols: { yfinance: "8058.T" }, decimals: 0 }
+    - { name: "YASKAWA",   symbols: { yfinance: "6506.T" }, decimals: 0 }
+    - { name: "FANUC",     symbols: { yfinance: "6954.T" }, decimals: 0 }
+    - { name: "USD/JPY",   symbols: { yfinance: "JPY=X" }, decimals: 2 }
+    - { name: "GOLD",      symbols: { yfinance: "GC=F"  }, decimals: 2 }
+    - { name: "ALIBABA",   symbols: { yfinance: "9988.HK", eodhd: "9988.HK" }, decimals: 2 }
+    - { name: "BAIDU",     symbols: { yfinance: "9888.HK", eodhd: "9888.HK" }, decimals: 2 }
 
   europe:
-    - { name: "EUR/USD",  symbols: { yfinance: "EURUSD=X" },          decimals: 4 }
-    - { name: "GBP/USD",  symbols: { yfinance: "GBPUSD=X" },          decimals: 4 }
-    - { name: "USD/CHF",  symbols: { yfinance: "CHF=X"    },          decimals: 4 }
-    - { name: "ASML",     symbols: { yfinance: "ASML", eodhd: "ASML.US" }, decimals: 2 }
-    - { name: "NESTLE",   symbols: { yfinance: "NSRGY", eodhd: "NSRGY.US" }, decimals: 2 }
-    - { name: "NOVO",     symbols: { yfinance: "NVO", eodhd: "NVO.US" },  decimals: 2 }
-    - { name: "BRENT",    symbols: { yfinance: "BZ=F" },              decimals: 2 }
-    - { name: "GOLD",     symbols: { yfinance: "GC=F" },              decimals: 2 }
+    - { name: "GBP/USD",   symbols: { yfinance: "GBPUSD=X" }, decimals: 4 }
+    - { name: "EUR/USD",   symbols: { yfinance: "EURUSD=X" }, decimals: 4 }
+    - { name: "BRIT LAND", symbols: { yfinance: "BLND.L",  eodhd: "BLND.LSE"  }, decimals: 2 }
+    - { name: "LAND SEC",  symbols: { yfinance: "LAND.L",  eodhd: "LAND.LSE"  }, decimals: 2 }
+    - { name: "CAIXABANK", symbols: { yfinance: "CABK.MC", eodhd: "CABK.MC"   }, decimals: 2 }
+    - { name: "MAPFRE",    symbols: { yfinance: "MAP.MC",  eodhd: "MAP.MC"    }, decimals: 2 }
+    - { name: "NATURGY",   symbols: { yfinance: "NTGY.MC", eodhd: "NTGY.MC"   }, decimals: 2 }
+    - { name: "ENGIE",     symbols: { yfinance: "ENGI.PA", eodhd: "ENGI.PA"   }, decimals: 2 }
 
 # -----------------------------------------------------------------------------
 # Logging
