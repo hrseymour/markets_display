@@ -235,9 +235,9 @@ charts:
       symbols: { yfinance: "^IXIC", eodhd: "IXIC.INDX" }
 
     - name: "RUSSELL 2000"
-      short: "RUT"
+      short: "RUI"
       market: US
-      symbols: { yfinance: "^RUT", eodhd: "RUT.INDX" }
+      symbols: { yfinance: "^RUI", eodhd: "RUI.INDX" }
 
   asia:
     - name: "NIKKEI 225"
@@ -266,10 +266,10 @@ charts:
       market: DE
       symbols: { yfinance: "^GDAXI", eodhd: "GDAXI.INDX" }
 
-    - name: "CAC 40"
-      short: "CAC"
-      market: FR
-      symbols: { yfinance: "^FCHI", eodhd: "FCHI.INDX" }
+    - name: "EURO TECH"
+      short: "SX8P"
+      market: DE
+      symbols: { yfinance: "^SX8P", eodhd: "SX8P.INDX" }
 
 # -----------------------------------------------------------------------------
 # TILES: bottom-row tiles per region. Each tile is the CNBC-style banner
