@@ -234,7 +234,7 @@ charts:
       market: US
       symbols: { yfinance: "^IXIC", eodhd: "IXIC.INDX" }
 
-    - name: "RUSSELL 2000"
+    - name: "RUSSELL 1000"
       short: "RUI"
       market: US
       symbols: { yfinance: "^RUI", eodhd: "RUI.INDX" }
